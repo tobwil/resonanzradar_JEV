@@ -164,12 +164,70 @@ function isUnsafeHost(hostname: string) {
   return host === 'localhost' || host.endsWith('.local') || host === '0.0.0.0' || host === '::1' || host.startsWith('127.') || host.startsWith('10.') || host.startsWith('192.168.') || host.startsWith('169.254.') || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
 }
 
+class JevRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+  }
+}
+
+async function analyzeBatch(feedItems: FeedItem[], apiKey: string) {
+  const jevResponse = await fetch('https://api.typesafe.ai/v1/systemone', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: { rss_items: feedItems }, model: 'jev-latest', questions: buildQuestions(feedItems) }),
+    signal: AbortSignal.timeout(45000),
+  });
+
+  const jevPayload = (await jevResponse.json()) as { answers?: Record<string, Answer> };
+  if (!jevResponse.ok || !jevPayload.answers) {
+    const message = jevResponse.status === 401 ? 'Der TypeSafe API-Key wurde nicht akzeptiert.' : jevResponse.status === 429 ? 'Das TypeSafe-Limit ist erreicht. Bitte kurz warten.' : `JEV konnte die Meldungen nicht bewerten (${jevResponse.status}).`;
+    throw new JevRequestError(message, jevResponse.status || 502);
+  }
+
+  return feedItems.map((item, index) => {
+    const answer = (name: string) => jevPayload.answers?.[`i${index}_${name}`];
+    const threat = safeNumber(answer('threat'), 'score');
+    const controlLoss = safeNumber(answer('control'), 'score');
+    const governmentFailure = safeNumber(answer('government'), 'noul');
+    const personalProximity = safeNumber(answer('proximity'), 'score');
+    const blame = safeNumber(answer('blame'), 'noul');
+    const solutionGap = safeNumber(answer('solution_gap'), 'noul');
+    const polarization = safeNumber(answer('polarization'), 'score');
+    const overlap = safeNumber(answer('overlap'), 'noul');
+
+    const uncertaintyIndex = Math.round(100 * (
+      0.25 * (threat / 4) +
+      0.2 * (controlLoss / 4) +
+      0.15 * governmentFailure +
+      0.1 * (personalProximity / 3) +
+      0.1 * blame +
+      0.1 * solutionGap +
+      0.1 * (polarization / 3)
+    ));
+    const resonanceScore = Math.round(0.75 * uncertaintyIndex + 25 * overlap);
+    const confidenceValues = ['topic', 'threat', 'control', 'proximity', 'polarization']
+      .map((name) => answer(name)?.confidence)
+      .filter((value): value is number => typeof value === 'number');
+
+    return {
+      ...item,
+      topic: answer('topic')?.choice || 'unclear',
+      topicConfidence: answer('topic')?.confidence ?? 0,
+      uncertaintyIndex,
+      resonanceScore,
+      overlap,
+      confidence: confidenceValues.length ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length : 0,
+      dimensions: { threat, controlLoss, governmentFailure, personalProximity, blame, solutionGap, polarization },
+    };
+  });
+}
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as { apiKey?: string; feedUrl?: string; limit?: number };
     const apiKey = body.apiKey?.trim();
     const feedUrl = body.feedUrl?.trim();
-    const limit = Math.min(12, Math.max(1, Number(body.limit) || 8));
+    const limit = Math.min(40, Math.max(1, Number(body.limit) || 8));
 
     if (!apiKey || !feedUrl) return Response.json({ error: 'API-Key und Feed-URL sind erforderlich.' }, { status: 400 });
 
@@ -190,58 +248,18 @@ export async function POST(request: Request) {
     const feedItems = parseFeed(xml, parsedUrl.toString(), limit).filter((item) => item.title || item.description);
     if (!feedItems.length) return Response.json({ error: 'Im Feed wurden keine RSS- oder Atom-Meldungen gefunden.' }, { status: 422 });
 
-    const jevResponse = await fetch('https://api.typesafe.ai/v1/systemone', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ state: { rss_items: feedItems }, model: 'jev-latest', questions: buildQuestions(feedItems) }),
-      signal: AbortSignal.timeout(45000),
-    });
+    const batches: FeedItem[][] = [];
+    for (let start = 0; start < feedItems.length; start += 10) batches.push(feedItems.slice(start, start + 10));
 
-    const jevPayload = (await jevResponse.json()) as { answers?: Record<string, Answer> };
-    if (!jevResponse.ok || !jevPayload.answers) {
-      const message = jevResponse.status === 401 ? 'Der TypeSafe API-Key wurde nicht akzeptiert.' : jevResponse.status === 429 ? 'Das TypeSafe-Limit ist erreicht. Bitte kurz warten.' : `JEV konnte die Meldungen nicht bewerten (${jevResponse.status}).`;
-      return Response.json({ error: message }, { status: jevResponse.status || 502 });
+    const items = [];
+    for (let start = 0; start < batches.length; start += 2) {
+      const groupResults = await Promise.all(batches.slice(start, start + 2).map((batch) => analyzeBatch(batch, apiKey)));
+      items.push(...groupResults.flat());
     }
 
-    const items = feedItems.map((item, index) => {
-      const answer = (name: string) => jevPayload.answers?.[`i${index}_${name}`];
-      const threat = safeNumber(answer('threat'), 'score');
-      const controlLoss = safeNumber(answer('control'), 'score');
-      const governmentFailure = safeNumber(answer('government'), 'noul');
-      const personalProximity = safeNumber(answer('proximity'), 'score');
-      const blame = safeNumber(answer('blame'), 'noul');
-      const solutionGap = safeNumber(answer('solution_gap'), 'noul');
-      const polarization = safeNumber(answer('polarization'), 'score');
-      const overlap = safeNumber(answer('overlap'), 'noul');
-
-      const uncertaintyIndex = Math.round(100 * (
-        0.25 * (threat / 4) +
-        0.2 * (controlLoss / 4) +
-        0.15 * governmentFailure +
-        0.1 * (personalProximity / 3) +
-        0.1 * blame +
-        0.1 * solutionGap +
-        0.1 * (polarization / 3)
-      ));
-      const resonanceScore = Math.round(0.75 * uncertaintyIndex + 25 * overlap);
-      const confidenceValues = ['topic', 'threat', 'control', 'proximity', 'polarization']
-        .map((name) => answer(name)?.confidence)
-        .filter((value): value is number => typeof value === 'number');
-
-      return {
-        ...item,
-        topic: answer('topic')?.choice || 'unclear',
-        topicConfidence: answer('topic')?.confidence ?? 0,
-        uncertaintyIndex,
-        resonanceScore,
-        overlap,
-        confidence: confidenceValues.length ? confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length : 0,
-        dimensions: { threat, controlLoss, governmentFailure, personalProximity, blame, solutionGap, polarization },
-      };
-    });
-
-    return Response.json({ model: 'jev-latest', items });
+    return Response.json({ model: 'jev-latest', batches: batches.length, items });
   } catch (error) {
+    if (error instanceof JevRequestError) return Response.json({ error: error.message }, { status: error.status });
     if (error instanceof Error && error.name === 'TimeoutError') return Response.json({ error: 'Die Anfrage hat zu lange gedauert. Bitte erneut versuchen.' }, { status: 504 });
     return Response.json({ error: 'Die Anfrage konnte nicht verarbeitet werden.' }, { status: 500 });
   }

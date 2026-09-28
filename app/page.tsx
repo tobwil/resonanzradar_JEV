@@ -218,13 +218,13 @@ export default function Home() {
           name: 'analyze_news_feed',
           title: 'Nachrichtenfeed analysieren',
           description:
-            'Analysiert bis zu zwölf Meldungen eines öffentlichen RSS- oder Atom-Feeds mit JEV und aktualisiert die sichtbare ResonanzRadar-Auswertung.',
+            'Analysiert bis zu 40 Meldungen eines öffentlichen RSS- oder Atom-Feeds mit JEV und aktualisiert die sichtbare ResonanzRadar-Auswertung.',
           inputSchema: {
             type: 'object',
             properties: {
               apiKey: { type: 'string', minLength: 1, description: 'TypeSafe API-Key; wird nicht gespeichert.' },
               feedUrl: { type: 'string', format: 'uri', description: 'Öffentliche RSS- oder Atom-URL.' },
-              limit: { type: 'integer', minimum: 1, maximum: 12, default: 8 },
+              limit: { type: 'integer', minimum: 1, maximum: 40, default: 8 },
             },
             required: ['apiKey', 'feedUrl'],
             additionalProperties: false,
@@ -235,7 +235,7 @@ export default function Home() {
             if (typeof values.apiKey !== 'string' || !values.apiKey.trim()) throw new Error('apiKey ist erforderlich.');
             if (typeof values.feedUrl !== 'string' || !values.feedUrl.trim()) throw new Error('feedUrl ist erforderlich.');
             const requestedLimit = values.limit === undefined ? 8 : Number(values.limit);
-            if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 12) throw new Error('limit muss zwischen 1 und 12 liegen.');
+            if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 40) throw new Error('limit muss zwischen 1 und 40 liegen.');
 
             setIsLoading(true);
             setError('');
@@ -392,6 +392,9 @@ export default function Home() {
                   <option value="5">5</option>
                   <option value="8">8</option>
                   <option value="12">12</option>
+                  <option value="20">20</option>
+                  <option value="30">30</option>
+                  <option value="40">40</option>
                 </select>
               </label>
               <button type="submit" className="primary-button" disabled={isLoading}>
