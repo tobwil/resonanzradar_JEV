@@ -8,7 +8,7 @@ const manrope = Manrope({ variable: '--font-manrope', subsets: ['latin'] });
 
 export const metadata: Metadata = {
   title: 'ResonanzRadar — JEV-Nachrichtenanalyse',
-  description: 'Analysiert Nachrichtenframes mit JEV auf Verunsicherung und politische Themenresonanz.',
+  description: 'Nachrichtenfeeds vergleichen: sprachliche Zuspitzung, dargestellte Bedrohung und politische Problemrahmung mit überprüfbaren Textstellen.',
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

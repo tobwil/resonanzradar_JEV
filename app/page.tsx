@@ -1,689 +1,155 @@
 'use client';
 
-import { useEffect, useMemo, useState, type SyntheticEvent } from 'react';
-import {
-  AlertCircle,
-  ArrowDown,
-  ArrowUp,
-  Check,
-  ChevronDown,
-  Download,
-  ExternalLink,
-  Eye,
-  GitCompareArrows,
-  KeyRound,
-  LoaderCircle,
-  Plus,
-  Radio,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  X,
-} from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type SyntheticEvent } from 'react';
+import { Radio, Plus, X, Download, ExternalLink, LoaderCircle, ArrowRight, Search, Info, GitCompareArrows } from 'lucide-react';
+import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
+import { NativeSelect } from '@/components/ui/native-select';
+import { Progress } from '@/components/ui/progress';
+import { DIMENSIONS, DIMENSION_KEYS, METHOD_VERSION, NARRATIVES, TOPICS, matchedTopics, summarize, type AnalysisEvent, type AnalysisItem, type Dimension, type Report } from '@/lib/analysis';
 
-type MainTopic =
-  | 'migration_asylum'
-  | 'crime_security'
-  | 'economy_costs_jobs'
-  | 'energy_climate'
-  | 'public_services_state'
-  | 'war_foreign_policy'
-  | 'democracy_social_cohesion'
-  | 'other'
-  | 'unclear';
-
-type ResultItem = {
-  id: string;
-  feedId: string;
-  title: string;
-  description: string;
-  source: string;
-  link?: string;
-  publishedAt?: string;
-  topic: MainTopic;
-  topicConfidence: number;
-  uncertaintyIndex: number;
-  resonanceScore: number;
-  overlap: number;
-  confidence: number;
-  dimensions: {
-    threat: number;
-    controlLoss: number;
-    governmentFailure: number;
-    personalProximity: number;
-    blame: number;
-    solutionGap: number;
-    polarization: number;
-  };
-};
-
-type WebMcpContext = {
-  registerTool: (
-    tool: {
-      name: string;
-      title: string;
-      description: string;
-      inputSchema: object;
-      annotations: { readOnlyHint: boolean; untrustedContentHint: boolean };
-      execute: (input: unknown) => Promise<unknown>;
-    },
-    options: { signal: AbortSignal },
-  ) => void | Promise<void>;
-};
-
-type AnalyzePayload = {
-  items: ResultItem[];
-  model?: string;
-  error?: string;
-};
-
-const TOPICS: Record<MainTopic, { label: string; short: string }> = {
-  migration_asylum: { label: 'Migration & Asyl', short: 'Migration' },
-  crime_security: { label: 'Kriminalität & Sicherheit', short: 'Sicherheit' },
-  economy_costs_jobs: { label: 'Wirtschaft, Kosten & Arbeit', short: 'Wirtschaft' },
-  energy_climate: { label: 'Energie & Klima', short: 'Energie' },
-  public_services_state: { label: 'Staat & öffentliche Dienste', short: 'Staat' },
-  war_foreign_policy: { label: 'Krieg & Außenpolitik', short: 'Außenpolitik' },
-  democracy_social_cohesion: { label: 'Demokratie & Zusammenhalt', short: 'Demokratie' },
-  other: { label: 'Anderes Thema', short: 'Anderes' },
-  unclear: { label: 'Unklar', short: 'Unklar' },
-};
-
-const SAMPLE_RESULTS: ResultItem[] = [
-  {
-    id: 'demo-1',
-    feedId: 'demo-a',
-    title: 'Kommunen warnen vor Überlastung bei Unterbringung und Betreuung',
-    description:
-      'Mehrere Städte berichten von knappen Kapazitäten und fordern schnellere Entscheidungen von Bund und Ländern.',
-    source: 'Nachrichtenfeed A',
-    topic: 'migration_asylum',
-    topicConfidence: 0.93,
-    uncertaintyIndex: 72,
-    resonanceScore: 76,
-    overlap: 0.89,
-    confidence: 0.82,
-    dimensions: {
-      threat: 3.2,
-      controlLoss: 3.5,
-      governmentFailure: 0.73,
-      personalProximity: 2.1,
-      blame: 0.74,
-      solutionGap: 0.78,
-      polarization: 2.2,
-    },
-  },
-  {
-    id: 'demo-2',
-    feedId: 'demo-b',
-    title: 'Energiepreise steigen zum Winter leicht an',
-    description:
-      'Verbraucherzentralen rechnen mit moderaten Mehrkosten und nennen konkrete Sparmöglichkeiten für Haushalte.',
-    source: 'Nachrichtenfeed B',
-    topic: 'energy_climate',
-    topicConfidence: 0.91,
-    uncertaintyIndex: 38,
-    resonanceScore: 49,
-    overlap: 0.82,
-    confidence: 0.88,
-    dimensions: {
-      threat: 1.6,
-      controlLoss: 1.0,
-      governmentFailure: 0.18,
-      personalProximity: 2.7,
-      blame: 0.31,
-      solutionGap: 0.17,
-      polarization: 0.8,
-    },
-  },
-  {
-    id: 'demo-3',
-    feedId: 'demo-a',
-    title: 'Stadt eröffnet neue Bibliothek im Zentrum',
-    description:
-      'Das Gebäude bietet mehr Arbeitsplätze, längere Öffnungszeiten und ein erweitertes Bildungsprogramm.',
-    source: 'Nachrichtenfeed A',
-    topic: 'public_services_state',
-    topicConfidence: 0.89,
-    uncertaintyIndex: 8,
-    resonanceScore: 14,
-    overlap: 0.29,
-    confidence: 0.9,
-    dimensions: {
-      threat: 0.2,
-      controlLoss: 0.1,
-      governmentFailure: 0.04,
-      personalProximity: 1.1,
-      blame: 0.03,
-      solutionGap: 0.04,
-      polarization: 0.1,
-    },
-  },
-];
-
-function scoreTone(score: number) {
-  if (score >= 65) return 'high';
-  if (score >= 40) return 'medium';
-  return 'low';
-}
-
-function scoreLabel(score: number) {
-  if (score >= 65) return 'starkes Signal';
-  if (score >= 40) return 'mittleres Signal';
-  return 'schwaches Signal';
-}
-
-function formatPercent(value: number) {
-  return `${Math.round(value * 100)} %`;
-}
+const PRESETS = ['https://www.tagesschau.de/infoservices/alle-meldungen-100~rss2.xml', 'https://www.bild.de/feed/news.xml'];
+type RunInput = { apiKey: string; feedUrls: string[]; limit: number; hours: number };
+type ModelContext = { registerTool(tool: { name: string; description: string; inputSchema: object; annotations: object; execute(input: unknown): Promise<unknown> }, options: { signal: AbortSignal }): void | Promise<void> };
+const number = (value: number | null) => value === null ? '—' : String(Math.round(value));
+const date = (value?: string) => value ? new Date(value).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'ohne Datum';
 
 export default function Home() {
   const [apiKey, setApiKey] = useState('');
-  const [feedUrls, setFeedUrls] = useState(['']);
-  const [limit, setLimit] = useState('8');
-  const [results, setResults] = useState<ResultItem[]>(SAMPLE_RESULTS);
-  const [selectedId, setSelectedId] = useState(SAMPLE_RESULTS[0].id);
-  const [isDemo, setIsDemo] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
+  const [feedUrls, setFeedUrls] = useState(PRESETS);
+  const [limit, setLimit] = useState(30);
+  const [hours, setHours] = useState(72);
+  const [report, setReport] = useState<Report | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const [sortDirection, setSortDirection] = useState<'desc' | 'asc'>('desc');
-  const [topicFilter, setTopicFilter] = useState<MainTopic | 'all'>('all');
+  const [progress, setProgress] = useState({ done: 0, total: 0, message: '' });
+  const [topic, setTopic] = useState('all');
+  const [geography, setGeography] = useState('all');
+  const [source, setSource] = useState('all');
+  const [sort, setSort] = useState<Dimension>('sensationalism');
   const [query, setQuery] = useState('');
-  const [showMethod, setShowMethod] = useState(false);
+  const [selectedId, setSelectedId] = useState('');
+  const running = useRef(false);
+  const controller = useRef<AbortController | null>(null);
 
-  const visibleResults = useMemo(() => {
-    return [...results]
-      .filter((item) => topicFilter === 'all' || item.topic === topicFilter)
-      .filter((item) =>
-        `${item.title} ${item.description} ${item.source}`
-          .toLocaleLowerCase('de')
-          .includes(query.toLocaleLowerCase('de')),
-      )
-      .sort((a, b) =>
-        sortDirection === 'desc'
-          ? b.resonanceScore - a.resonanceScore
-          : a.resonanceScore - b.resonanceScore,
-      );
-  }, [results, topicFilter, query, sortDirection]);
-
-  const selected =
-    results.find((item) => item.id === selectedId) ?? visibleResults[0] ?? null;
-  const average = results.length
-    ? Math.round(results.reduce((sum, item) => sum + item.resonanceScore, 0) / results.length)
-    : 0;
-  const strongSignals = results.filter((item) => item.resonanceScore >= 65).length;
-  const lowConfidence = results.filter((item) => item.confidence < 0.55).length;
-  const feedComparison = useMemo(() => {
-    const groups = new Map<string, ResultItem[]>();
-    for (const item of results) groups.set(item.feedId, [...(groups.get(item.feedId) ?? []), item]);
-
-    return [...groups.entries()]
-      .map(([feedId, items]) => ({
-        feedId,
-        source: items[0]?.source ?? 'Unbekannter Feed',
-        count: items.length,
-        resonance: Math.round(items.reduce((sum, item) => sum + item.resonanceScore, 0) / items.length),
-        uncertainty: Math.round(items.reduce((sum, item) => sum + item.uncertaintyIndex, 0) / items.length),
-        overlap: items.reduce((sum, item) => sum + item.overlap, 0) / items.length,
-        strongShare: items.filter((item) => item.resonanceScore >= 65).length / items.length,
-        confidence: items.reduce((sum, item) => sum + item.confidence, 0) / items.length,
-      }))
-      .sort((a, b) => b.resonance - a.resonance);
-  }, [results]);
-
-  useEffect(() => {
-    const context = (document as Document & { modelContext?: WebMcpContext }).modelContext;
-    if (!context?.registerTool) return;
-
-    const lifecycle = new AbortController();
-    void Promise.resolve(
-      context.registerTool(
-        {
-          name: 'analyze_news_feed',
-          title: 'Nachrichtenfeeds vergleichen',
-          description:
-            'Analysiert und vergleicht bis zu fünf öffentliche RSS- oder Atom-Feeds mit jeweils bis zu 40 Meldungen und aktualisiert die sichtbare ResonanzRadar-Auswertung.',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              apiKey: { type: 'string', minLength: 1, description: 'TypeSafe API-Key; wird nicht gespeichert.' },
-              feedUrls: {
-                type: 'array',
-                minItems: 1,
-                maxItems: 5,
-                uniqueItems: true,
-                items: { type: 'string', format: 'uri' },
-                description: 'Eine bis fünf öffentliche RSS- oder Atom-URLs.',
-              },
-              limit: { type: 'integer', minimum: 1, maximum: 40, default: 8 },
-            },
-            required: ['apiKey', 'feedUrls'],
-            additionalProperties: false,
-          },
-          annotations: { readOnlyHint: true, untrustedContentHint: true },
-          async execute(input) {
-            const values = input as { apiKey?: unknown; feedUrls?: unknown; limit?: unknown };
-            if (typeof values.apiKey !== 'string' || !values.apiKey.trim()) throw new Error('apiKey ist erforderlich.');
-            if (!Array.isArray(values.feedUrls) || values.feedUrls.length < 1 || values.feedUrls.length > 5 || values.feedUrls.some((url) => typeof url !== 'string' || !url.trim())) throw new Error('feedUrls muss eine bis fünf URLs enthalten.');
-            const requestedFeedUrls = [...new Set(values.feedUrls.map((url) => String(url).trim()))];
-            const requestedLimit = values.limit === undefined ? 8 : Number(values.limit);
-            if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 40) throw new Error('limit muss zwischen 1 und 40 liegen.');
-
-            setIsLoading(true);
-            setError('');
-            try {
-              const response = await fetch('/api/analyze', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ apiKey: values.apiKey.trim(), feedUrls: requestedFeedUrls, limit: requestedLimit }),
-              });
-              const payload = (await response.json()) as AnalyzePayload;
-              if (!response.ok) throw new Error(payload.error || 'Die Auswertung ist fehlgeschlagen.');
-              setResults(payload.items);
-              setSelectedId(payload.items[0]?.id ?? '');
-              setIsDemo(false);
-              setFeedUrls(requestedFeedUrls);
-              setLimit(String(requestedLimit));
-              return { feeds: requestedFeedUrls.length, analyzed: payload.items.length, model: payload.model, highestResonance: Math.max(...payload.items.map((item: ResultItem) => item.resonanceScore)) };
-            } catch (toolError) {
-              const message = toolError instanceof Error ? toolError.message : 'Die Auswertung ist fehlgeschlagen.';
-              setError(message);
-              throw new Error(message);
-            } finally {
-              setIsLoading(false);
-            }
-          },
-        },
-        { signal: lifecycle.signal },
-      ),
-    ).catch(() => undefined);
-
-    return () => lifecycle.abort();
+  const run = useCallback(async (input: RunInput) => {
+    if (running.current) throw new Error('Eine Analyse läuft bereits.');
+    if (!input.apiKey.trim()) throw new Error('Bitte deinen TypeSafe API-Key eintragen.');
+    if (input.feedUrls.length < 1 || input.feedUrls.length > 5 || new Set(input.feedUrls).size !== input.feedUrls.length) throw new Error('Bitte eine bis fünf unterschiedliche Feeds eintragen.');
+    running.current = true; setBusy(true); setError(''); setProgress({ done: 0, total: 0, message: 'Analyse wird vorbereitet …' });
+    const abort = new AbortController(); controller.current = abort;
+    try {
+      const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: abort.signal });
+      if (!response.ok) { const body = await response.json() as { error?: string }; throw new Error(body.error ?? 'Analyse konnte nicht gestartet werden.'); }
+      const reader = response.body?.getReader(); if (!reader) throw new Error('Keine Antwort erhalten.');
+      const decoder = new TextDecoder(); let buffer = ''; let completed: Report | null = null;
+      while (true) {
+        const part = await reader.read(); buffer += decoder.decode(part.value, { stream: !part.done });
+        const lines = buffer.split('\n'); buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          const event = JSON.parse(line) as AnalysisEvent;
+          if (event.type === 'error') throw new Error(event.message);
+          if (event.type === 'progress') setProgress(event);
+          if (event.type === 'complete') completed = event.report;
+        }
+        if (part.done) break;
+      }
+      if (!completed) throw new Error('Die Verbindung wurde vor Abschluss unterbrochen. Bitte erneut starten.');
+      setReport(completed); setSelectedId(completed.items[0]?.id ?? ''); setTopic('all'); setSource('all'); setGeography('all'); setQuery('');
+      return completed;
+    } catch (caught) {
+      const message = abort.signal.aborted ? 'Analyse abgebrochen. Bereits gestartete API-Anfragen können Kosten verursachen.' : caught instanceof Error ? caught.message : 'Analyse fehlgeschlagen.';
+      setError(message); throw new Error(message);
+    } finally { setBusy(false); running.current = false; controller.current = null; }
   }, []);
 
-  function updateFeedUrl(index: number, value: string) {
-    setFeedUrls((current) => current.map((url, itemIndex) => itemIndex === index ? value : url));
-  }
-
-  function addFeedUrl() {
-    setFeedUrls((current) => current.length < 5 ? [...current, ''] : current);
-  }
-
-  function removeFeedUrl(index: number) {
-    setFeedUrls((current) => current.length > 1 ? current.filter((_, itemIndex) => itemIndex !== index) : current);
-  }
-
-  async function analyzeFeed(event: SyntheticEvent<HTMLFormElement>) {
-    event.preventDefault();
-    setError('');
-
-    const activeFeedUrls = feedUrls.map((url) => url.trim()).filter(Boolean);
-
-    if (!apiKey.trim() || !activeFeedUrls.length) {
-      setError('Bitte API-Key und mindestens eine RSS- oder Atom-URL eintragen.');
-      return;
-    }
-    if (new Set(activeFeedUrls).size !== activeFeedUrls.length) {
-      setError('Jeder Feed darf nur einmal eingetragen werden.');
-      return;
-    }
-
-    setIsLoading(true);
+  useEffect(() => {
+    const context = (document as Document & { modelContext?: ModelContext }).modelContext;
+    if (!context?.registerTool) return;
+    const lifecycle = new AbortController();
     try {
-      const response = await fetch('/api/analyze', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          apiKey: apiKey.trim(),
-          feedUrls: activeFeedUrls,
-          limit: Number(limit),
-        }),
-      });
-      const payload = (await response.json()) as AnalyzePayload;
-      if (!response.ok) throw new Error(payload.error || 'Die Auswertung ist fehlgeschlagen.');
+      void Promise.resolve(context.registerTool({ name: 'analyze_news_feed', description: 'Analysiert bis zu fünf Feeds mit bis zu 40 Artikeln je Feed. Verwendet TypeSafe und verursacht API-Nutzung. Aktualisiert die sichtbare Auswertung.', annotations: { readOnlyHint: false, untrustedContentHint: true }, inputSchema: { type: 'object', properties: { apiKey: { type: 'string' }, feedUrls: { type: 'array', minItems: 1, maxItems: 5, uniqueItems: true, items: { type: 'string', format: 'uri' } }, limit: { type: 'integer', minimum: 1, maximum: 40, default: 30 }, hours: { type: 'integer', enum: [0, 24, 72, 168], default: 72 } }, required: ['apiKey', 'feedUrls'], additionalProperties: false }, async execute(value) {
+        const input = value as Partial<RunInput>;
+        if (typeof input.apiKey !== 'string' || !Array.isArray(input.feedUrls) || input.feedUrls.some((u) => typeof u !== 'string')) throw new Error('API-Key und Feed-URLs fehlen oder sind ungültig.');
+        const result = await run({ apiKey: input.apiKey, feedUrls: input.feedUrls, limit: input.limit ?? 30, hours: input.hours ?? 72 });
+        return { analyzed: result.items.length, feeds: result.feeds.length, method: result.method, warnings: result.warnings };
+      } }, { signal: lifecycle.signal })).catch(() => undefined);
+    } catch { /* Browser support is optional. */ }
+    return () => lifecycle.abort();
+  }, [run]);
+  useEffect(() => () => controller.current?.abort(), []);
 
-      setResults(payload.items);
-      setSelectedId(payload.items[0]?.id ?? '');
-      setIsDemo(false);
-    } catch (requestError) {
-      setError(
-        requestError instanceof Error
-          ? requestError.message
-          : 'Die Auswertung ist fehlgeschlagen.',
-      );
-    } finally {
-      setIsLoading(false);
-    }
+  const analysisItems = useMemo(() => (report?.items ?? []).filter((i) => (topic === 'all' || i.topic === topic) && (geography === 'all' || i.geography === geography)), [report, topic, geography]);
+  const visible = useMemo(() => analysisItems.filter((i) => (source === 'all' || i.feedId === source) && `${i.title} ${i.description}`.toLocaleLowerCase('de').includes(query.toLocaleLowerCase('de'))).sort((a, b) => b.scores[sort] - a.scores[sort]), [analysisItems, source, query, sort]);
+  const selected = visible.find((i) => i.id === selectedId) ?? visible[0];
+  const matched = matchedTopics(analysisItems, report?.feeds.map((f) => f.id) ?? []);
+  const summary = summarize(analysisItems);
+
+  async function submit(event: SyntheticEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try { await run({ apiKey: apiKey.trim(), feedUrls: feedUrls.map((u) => u.trim()).filter(Boolean), limit, hours }); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : 'Analyse fehlgeschlagen.'); }
+  }
+  function download() {
+    if (!report) return;
+    const blob = new Blob([JSON.stringify({ ...report, summaries: report.feeds.map((f) => ({ feed: f.id, ...summarize(report.items.filter((i) => i.feedId === f.id)) })), matchedTopics: matchedTopics(report.items, report.feeds.map((f) => f.id)) }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `resonanzradar-v${report.method}-${report.startedAt.slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url);
   }
 
-  function exportResults() {
-    const blob = new Blob(
-      [JSON.stringify({ generatedAt: new Date().toISOString(), feeds: feedComparison, items: results }, null, 2)],
-      { type: 'application/json' },
-    );
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `jev-resonanzanalyse-${new Date().toISOString().slice(0, 10)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  }
-
-  return (
-    <main className="min-h-screen bg-[var(--canvas)] text-[var(--ink)]">
-      <header className="border-b border-white/10 bg-[var(--navy)] text-white">
-        <div className="mx-auto flex max-w-[1500px] items-center justify-between px-5 py-4 lg:px-8">
-          <div className="flex items-center gap-3">
-            <div className="grid size-9 place-items-center rounded-lg bg-[var(--signal)] text-[var(--navy)]">
-              <Radio size={20} strokeWidth={2.5} />
-            </div>
-            <div>
-              <p className="font-display text-lg font-semibold leading-none tracking-tight">ResonanzRadar</p>
-              <p className="mt-1 text-xs text-slate-400">JEV-Analyse für Nachrichtenframes</p>
-            </div>
+  return <main>
+    <header className="masthead"><div className="shell masthead-inner"><div className="brand"><span className="brand-icon"><Radio size={22} /></span><div><strong>ResonanzRadar</strong><span>Nachrichten im Vergleich</span></div></div><span className="version">Methodik {METHOD_VERSION}</span></div></header>
+    <div className="shell">
+      <section className="intro"><p className="eyebrow">SPRACHE · BEDROHUNG · POLITISCHE DEUTUNG</p><h1>Wie rahmen Medien ihre Nachrichten?</h1><p>Vergleiche, wie zugespitzt ein Text formuliert ist, welche Bedrohung er beschreibt und wem er politische Verantwortung zuschreibt.</p></section>
+      <form className="panel setup" onSubmit={submit}>
+        <fieldset disabled={busy}><legend className="sr-only">Analyse konfigurieren</legend><div className="setup-grid">
+          <div><div className="section-label"><label htmlFor="feed-0">Quellen vergleichen</label><button className="text-button" type="button" disabled={feedUrls.length >= 5} onClick={() => setFeedUrls([...feedUrls, ''])}><Plus size={15} /> Feed hinzufügen</button></div>
+            <div className="feed-fields">{feedUrls.map((url, index) => <div className="feed-input" key={index}><span>{index + 1}</span><input id={`feed-${index}`} type="url" value={url} onChange={(e) => setFeedUrls(feedUrls.map((u, i) => i === index ? e.target.value : u))} placeholder="https://…/feed.xml" aria-label={`Feed ${index + 1}`} /><button type="button" className="icon-button" aria-label={`Feed ${index + 1} entfernen`} disabled={feedUrls.length === 1} onClick={() => setFeedUrls(feedUrls.filter((_, i) => i !== index))}><X size={15} /></button></div>)}</div>
+            <p className="fine">Bis zu 5 Feeds. Die vorbelegten URLs stammen aus deinem Vergleich.</p>
           </div>
-          <div className="flex items-center gap-2 text-xs text-slate-300">
-            <span className="hidden items-center gap-1.5 sm:flex">
-              <ShieldCheck size={14} className="text-[var(--signal)]" />
-              Kein Schlüssel wird gespeichert
-            </span>
-            <span className="rounded-full border border-white/15 px-2.5 py-1">jev-latest</span>
-          </div>
-        </div>
-      </header>
+          <div className="settings"><label htmlFor="key">TypeSafe API-Key<input id="key" type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Deinen API-Key eintragen" /></label><div className="settings-row"><label htmlFor="hours">Gemeinsamer Zeitraum<NativeSelect id="hours" value={hours} onChange={(e) => setHours(Number(e.target.value))}><option value={24}>Letzte 24 Stunden</option><option value={72}>Letzte 72 Stunden</option><option value={168}>Letzte 7 Tage</option><option value={0}>Alle gelieferten Artikel</option></NativeSelect></label><label htmlFor="limit">Max. Artikel je Feed<NativeSelect id="limit" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>{[5, 8, 12, 20, 30, 40].map((n) => <option key={n} value={n}>{n}</option>)}</NativeSelect></label></div><button className="primary-button" type="submit">{busy ? <LoaderCircle size={17} className="animate-spin" /> : <GitCompareArrows size={17} />}{busy ? 'Analyse läuft' : 'Vergleich starten'}<ArrowRight size={16} /></button><p className="fine">Bis zu {limit * feedUrls.filter(Boolean).length} Artikel. Titel und Kurztexte werden an TypeSafe gesendet. Der Key wird von dieser App nicht gespeichert.</p></div>
+        </div></fieldset>
+        {busy && <div className="run-status"><div><output aria-live="polite">{progress.message}</output><button type="button" className="text-button" onClick={() => controller.current?.abort()}>Abbrechen</button></div><Progress aria-label="Analysefortschritt" value={progress.total ? 100 * progress.done / progress.total : null} /></div>}
+        {error && <p role="alert" className="error-message">{error}</p>}
+      </form>
 
-      <section className="border-b border-[var(--line)] bg-[var(--paper)]">
-        <div className="mx-auto grid max-w-[1500px] gap-8 px-5 py-7 lg:grid-cols-[minmax(0,1fr)_minmax(520px,1.2fr)] lg:px-8">
-          <div className="max-w-xl">
-            <div className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.15em] text-[var(--teal)]">
-              <span className="h-px w-7 bg-[var(--teal)]" />
-              Arbeitsinstrument, kein Wahlprognosemodell
-            </div>
-            <h1 className="font-display text-3xl font-semibold leading-[1.08] tracking-[-0.035em] text-[var(--navy)] sm:text-4xl">
-              Welche Nachrichten erzeugen politische Resonanz?
-            </h1>
-            <p className="mt-3 max-w-[58ch] text-[15px] leading-6 text-[var(--muted-ink)]">
-              JEV bewertet beobachtbare Themen und Frames. Der Resonanzwert zeigt, wie stark
-              Verunsicherung und AfD-Agenda-Nähe zusammentreffen — nicht, ob Menschen tatsächlich
-              ihre Wahlabsicht ändern.
-            </p>
-          </div>
+      <div className="method-note"><Info size={19} /><p><strong>Ein niedriger Wert ist kein Objektivitätsurteil.</strong> Die Messwerte beschreiben Texte. Sie belegen weder journalistische Qualität noch eine Wirkung auf die AfD-Wahlabsicht. Das neue Schema ersetzt den bisherigen, unkalibrierten Gesamtwert.</p></div>
 
-          <form onSubmit={analyzeFeed} className="grid gap-3 rounded-2xl border border-[var(--line)] bg-white p-4 shadow-sm sm:grid-cols-[1fr_auto]">
-            <label className="sm:col-span-2">
-              <span className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-[var(--navy)]">
-                <KeyRound size={13} /> TypeSafe API-Key
-              </span>
-              <input
-                type="password"
-                autoComplete="off"
-                value={apiKey}
-                onChange={(event) => setApiKey(event.target.value)}
-                placeholder="ts_…"
-                className="field"
-                aria-label="TypeSafe API-Key"
-              />
-            </label>
-            <div className="sm:col-span-2">
-              <div className="mb-1.5 flex items-center justify-between gap-3">
-                <span className="text-xs font-semibold text-[var(--navy)]">RSS- oder Atom-Feeds · bis zu 5</span>
-                <button type="button" onClick={addFeedUrl} disabled={feedUrls.length >= 5} className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] disabled:text-slate-400">
-                  <Plus size={13} /> Feed hinzufügen
-                </button>
-              </div>
-              <div className="space-y-2">
-                {feedUrls.map((url, index) => (
-                  <div key={index} className="flex items-center gap-2">
-                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--soft)] text-xs font-bold text-[var(--teal)]">{index + 1}</span>
-                    <input
-                      type="url"
-                      value={url}
-                      onChange={(event) => updateFeedUrl(index, event.target.value)}
-                      placeholder={index === 0 ? 'https://…/feed.xml' : 'Weiteren Feed eintragen'}
-                      className="field"
-                      aria-label={`RSS- oder Atom-Feed ${index + 1}`}
-                    />
-                    <button type="button" onClick={() => removeFeedUrl(index)} disabled={feedUrls.length === 1} className="icon-button shrink-0" aria-label={`Feed ${index + 1} entfernen`} title="Feed entfernen">
-                      <X size={15} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="grid grid-cols-[110px_1fr] items-end gap-2 sm:col-span-2">
-              <label>
-                <span className="mb-1.5 block text-xs font-semibold text-[var(--navy)]">Artikel je Feed</span>
-                <select value={limit} onChange={(event) => setLimit(event.target.value)} className="field">
-                  <option value="5">5</option>
-                  <option value="8">8</option>
-                  <option value="12">12</option>
-                  <option value="20">20</option>
-                  <option value="30">30</option>
-                  <option value="40">40</option>
-                </select>
-              </label>
-              <button type="submit" className="primary-button" disabled={isLoading}>
-                {isLoading ? <LoaderCircle className="animate-spin" size={17} /> : <Sparkles size={17} />}
-                {isLoading ? 'JEV vergleicht …' : feedUrls.length > 1 ? 'Feeds vergleichen' : 'Feed analysieren'}
-              </button>
-            </div>
-            {error && (
-              <p className="flex items-start gap-2 text-sm text-red-700 sm:col-span-2" role="alert">
-                <AlertCircle className="mt-0.5 shrink-0" size={16} /> {error}
-              </p>
-            )}
-          </form>
-        </div>
-      </section>
+      {!report ? <section className="panel empty-state"><GitCompareArrows size={30} /><h2>Starte einen überprüfbaren Vergleich</h2><p>Du erhältst separate Messwerte, einen Themenvergleich und Originaltextstellen zu auffälligen Formulierungen. Vor der ersten Analyse werden keine Beispielwerte als Ergebnis angezeigt.</p></section> : <>
+        <div className="results-heading"><div><p className="eyebrow">DEINE STICHPROBE</p><h2>{report.items.length} ausgewertete Meldungen · {report.feeds.length} Feeds</h2><p className="fine">Abruf {date(report.startedAt)} · {report.hours ? `letzte ${report.hours} Stunden` : 'ohne Zeitbegrenzung'} · {report.models.join(', ') || 'kein Modellaufruf abgeschlossen'}{busy ? ' · vorheriger Vergleich' : ''}</p></div><button className="secondary-button" onClick={download}><Download size={16} /> Analyse exportieren</button></div>
+        {!!report.warnings.length && <details className="notice"><summary>{report.warnings.length} Hinweise zur Verarbeitung — fehlende Werte zählen nicht als null</summary><ul>{report.warnings.map((w, i) => <li key={i}>{w}</li>)}</ul></details>}
+        <div className="comparison-filters"><label htmlFor="topic">Thema für den Vergleich<NativeSelect id="topic" value={topic} onChange={(e) => setTopic(e.target.value)}><option value="all">Alle Themen</option>{Object.entries(TOPICS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</NativeSelect></label><label htmlFor="geo">Geografischer Bezug<NativeSelect id="geo" value={geography} onChange={(e) => setGeography(e.target.value)}><option value="all">Alle Meldungen</option><option value="germany">Deutschlandbezug</option><option value="foreign">Ausland ohne genannten Deutschlandbezug</option><option value="unclear">Bezug unklar</option></NativeSelect></label><p className="fine">Diese Filter wirken auf den Feedvergleich und die Einzelmeldungen.</p></div>
 
-      <div className="mx-auto max-w-[1500px] px-5 py-6 lg:px-8">
-        <section className="mb-5 grid gap-3 sm:grid-cols-3">
-          <Metric label="Mittleres Resonanzsignal" value={`${average}/100`} detail={scoreLabel(average)} tone={scoreTone(average)} />
-          <Metric label="Starke Signale" value={`${strongSignals}`} detail={`von ${results.length} Meldungen`} tone={strongSignals ? 'high' : 'low'} />
-          <Metric label="Manuell prüfen" value={`${lowConfidence}`} detail="Konfidenz unter 55 %" tone={lowConfidence ? 'medium' : 'low'} />
+        <section className="panel compare-panel"><div className="panel-title"><div><h2>Feedprofile nebeneinander</h2><p>Mittelwerte pro Artikel · 0 = nicht ausgeprägt, 100 = sehr stark ausgeprägt</p></div><span className="pill">Kein Gesamtranking</span></div>
+          <Table><TableHeader><TableRow><TableHead>Feed / Datenbasis</TableHead><TableHead>n</TableHead><TableHead>Zuspitzung</TableHead><TableHead>Bedrohung</TableHead><TableHead>Politische Rahmung</TableHead><TableHead>Verallgemeinerung</TableHead><TableHead>Prüfbedarf</TableHead></TableRow></TableHeader><TableBody>{report.feeds.map((feed) => {
+            const allItems = report.items.filter((i) => i.feedId === feed.id); const rows = analysisItems.filter((i) => i.feedId === feed.id); const stats = summarize(rows);
+            const dates = allItems.map((i) => i.publishedAt).filter((d): d is string => !!d).sort();
+            return <TableRow key={feed.id}><TableCell className="feed-name"><strong>{feed.name}</strong><span>{allItems.length}/{feed.selected} ausgewertet · {feed.eligible} im Zeitfenster</span><span>{dates.length ? `${date(dates[0])} – ${date(dates.at(-1))}` : 'keine Datumsbasis'}</span>{feed.error && <span className="error-text">{feed.error}</span>}{feed.failed > 0 && <span className="error-text">{feed.failed} Auswertungen fehlen</span>}</TableCell><TableCell>{stats.count}</TableCell>{DIMENSION_KEYS.map((k) => <TableCell key={k}><Score value={stats.scores[k]} /></TableCell>)}<TableCell>{stats.review}/{stats.count}</TableCell></TableRow>;
+          })}</TableBody></Table>
+          <p className="table-note">n = tatsächlich ausgewertete Artikel nach Filter. Verschiedene Themen, Zeitabdeckungen und Kurztextlängen beeinflussen die Werte. Kleine Unterschiede sind kein belastbarer Nachweis eines Medienunterschieds.</p>
         </section>
 
-        <section className="mb-5 overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-[0_8px_28px_rgba(16,31,45,0.045)]">
-          <div className="flex flex-col gap-1 border-b border-[var(--line)] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2.5">
-              <span className="grid size-8 place-items-center rounded-lg bg-[var(--soft)] text-[var(--teal)]"><GitCompareArrows size={16} /></span>
-              <div><h2 className="font-display font-semibold text-[var(--navy)]">Feedvergleich</h2><p className="text-xs text-[var(--muted-ink)]">Normalisierte Mittelwerte bei gleicher Artikelzahl je Feed</p></div>
-            </div>
-            <p className="mt-2 text-xs text-slate-500 sm:mt-0">{feedComparison.length} {feedComparison.length === 1 ? 'Feed' : 'Feeds'} · Rang nach Resonanzsignal</p>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[820px] border-collapse text-left">
-              <thead><tr className="bg-[var(--soft)]/70 text-[11px] font-bold uppercase tracking-[0.1em] text-slate-500">
-                <th className="px-4 py-2.5">Rang</th><th className="px-3 py-2.5">Feed</th><th className="px-3 py-2.5 text-right">Meldungen</th><th className="px-3 py-2.5 text-right">Verunsicherung</th><th className="px-3 py-2.5 text-right">Agenda-Nähe</th><th className="px-3 py-2.5 text-right">Starke Signale</th><th className="px-3 py-2.5 text-right">JEV-Sicherheit</th><th className="px-4 py-2.5 text-right">Resonanz</th>
-              </tr></thead>
-              <tbody>
-                {feedComparison.map((feed, index) => (
-                  <tr key={feed.feedId} className="border-t border-[var(--line)] text-sm">
-                    <td className="px-4 py-3.5"><span className="grid size-7 place-items-center rounded-full bg-[var(--soft)] text-xs font-bold text-[var(--navy)]">{index + 1}</span></td>
-                    <td className="px-3 py-3.5 font-semibold text-[var(--navy)]">{feed.source}</td>
-                    <td className="px-3 py-3.5 text-right tabular-nums text-slate-600">{feed.count}</td>
-                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{feed.uncertainty}/100</td>
-                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.overlap)}</td>
-                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.strongShare)}</td>
-                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.confidence)}</td>
-                    <td className="px-4 py-3.5 text-right"><ScorePill score={feed.resonance} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="border-t border-[var(--line)] px-4 py-3 text-xs leading-5 text-slate-500">Der Vergleich zeigt das Profil der aktuell eingelesenen Titel und Kurztexte. Er misst weder journalistische Gesamtqualität noch politische Absicht eines Mediums.</p>
+        <section className="panel"><div className="panel-title"><div><h2>Vergleich bei gleichem Themenmix</h2><p>Jedes gemeinsame Thema zählt gleich viel — damit etwa mehr Kriminalitätsmeldungen den Vergleich nicht allein bestimmen.</p></div></div>
+          {matched.topics.length ? <><p className="table-note">Gemeinsame Themen mit mindestens 2 Artikeln pro Feed: {matched.topics.map((t) => TOPICS[t]).join(', ')}. Verschiedene Ereignisse innerhalb eines Themas bleiben ein Einflussfaktor.</p><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Artikel in gemeinsamen Themen</TableHead>{DIMENSION_KEYS.map((k) => <TableHead key={k}>{DIMENSIONS[k].short}</TableHead>)}</TableRow></TableHeader><TableBody>{matched.feeds.map((f) => <TableRow key={f.id}><TableCell>{report.feeds.find((feed) => feed.id === f.id)?.name}</TableCell><TableCell>{f.count}</TableCell>{DIMENSION_KEYS.map((k) => <TableCell key={k}><Score value={f.scores[k]} /></TableCell>)}</TableRow>)}</TableBody></Table></> : <p className="empty-inline">Für einen thematisch angeglichenen Vergleich fehlen gemeinsame Themen mit mindestens zwei Artikeln in jedem Feed. Zeitraum erweitern oder mehr Artikel einlesen.</p>}
         </section>
 
-        <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-[0_12px_40px_rgba(16,31,45,0.06)]">
-          <div className="flex flex-col gap-3 border-b border-[var(--line)] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-3">
-              <h2 className="font-display text-lg font-semibold text-[var(--navy)]">Auswertung</h2>
-              {isDemo && <span className="rounded-full bg-sky-50 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wider text-sky-700">Demo</span>}
-              <span className="text-sm text-[var(--muted-ink)]">{visibleResults.length} Meldungen</span>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="search-field">
-                <Search size={15} />
-                <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Meldungen filtern" aria-label="Meldungen filtern" />
-              </label>
-              <select value={topicFilter} onChange={(event) => setTopicFilter(event.target.value as MainTopic | 'all')} className="compact-select" aria-label="Thema filtern">
-                <option value="all">Alle Themen</option>
-                {Object.entries(TOPICS).map(([key, topic]) => <option key={key} value={key}>{topic.short}</option>)}
-              </select>
-              <button className="icon-button" onClick={() => setSortDirection((current) => (current === 'desc' ? 'asc' : 'desc'))} aria-label="Sortierung wechseln" title="Sortierung wechseln">
-                {sortDirection === 'desc' ? <ArrowDown size={16} /> : <ArrowUp size={16} />}
-              </button>
-              <button className="icon-button" onClick={exportResults} aria-label="Ergebnisse als JSON exportieren" title="JSON exportieren">
-                <Download size={16} />
-              </button>
-            </div>
-          </div>
+        <div className="two-panels"><section className="panel"><div className="panel-title"><div><h2>Was steckt im Themenmix?</h2><p>Anteile und Anzahlen in der gefilterten Stichprobe.</p></div></div><div className="mix-list">{report.feeds.map((f) => { const rows = analysisItems.filter((i) => i.feedId === f.id); return <div key={f.id}><h3>{f.name}</h3><div className="topic-list">{Object.entries(TOPICS).map(([key, label]) => { const n = rows.filter((i) => i.topic === key).length; return n ? <span className="pill" key={key}>{label} {Math.round(100 * n / rows.length)} % <small>({n})</small></span> : null; })}{!rows.length && <span className="fine">Keine Artikel</span>}</div></div>; })}</div></section>
+        <section className="panel"><div className="panel-title"><div><h2>Politische Narrative im Text</h2><p>Vorab definierte Motive deiner AfD-Fragestellung. Sie sind nicht parteiexklusiv.</p></div></div><div className="mix-list">{report.feeds.map((f) => { const rows = analysisItems.filter((i) => i.feedId === f.id); const narrativeRows = rows.filter((i) => !['none', 'unclear'].includes(i.narrative)); return <div key={f.id}><h3>{f.name}</h3><p className="fine">{narrativeRows.filter((i) => i.narrativeVoice === 'asserted').length} bekräftigt / unmarkiert · {narrativeRows.filter((i) => i.narrativeVoice === 'attributed').length} als fremde Position · {narrativeRows.filter((i) => i.narrativeVoice === 'challenged').length} relativiert / widerlegt · {narrativeRows.filter((i) => ['unclear', 'absent'].includes(i.narrativeVoice)).length} unklar / widersprüchlich · Basis {rows.length}</p><div className="topic-list">{Object.entries(NARRATIVES).filter(([k]) => !['none', 'unclear'].includes(k)).map(([k, label]) => { const n = narrativeRows.filter((i) => i.narrative === k).length; return n ? <span className="pill" key={k}>{label} ({n})</span> : null; })}</div></div>; })}</div></section></div>
 
-          <div className="grid min-h-[560px] lg:grid-cols-[minmax(0,1.55fr)_minmax(360px,0.8fr)]">
-            <div className="overflow-x-auto border-b border-[var(--line)] lg:border-b-0 lg:border-r">
-              <table className="w-full min-w-[760px] border-collapse text-left">
-                <thead>
-                  <tr className="bg-[var(--soft)] text-[11px] font-bold uppercase tracking-[0.11em] text-slate-500">
-                    <th className="px-4 py-3">Meldung</th>
-                    <th className="px-3 py-3">Hauptthema</th>
-                    <th className="px-3 py-3">Verunsicherung</th>
-                    <th className="px-3 py-3">Agenda-Nähe</th>
-                    <th className="px-4 py-3 text-right">Resonanz</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleResults.map((item) => (
-                    <tr
-                      key={item.id}
-                      onClick={() => setSelectedId(item.id)}
-                      className={`cursor-pointer border-t border-[var(--line)] transition-colors hover:bg-cyan-50/40 ${selected?.id === item.id ? 'bg-cyan-50/70' : ''}`}
-                    >
-                      <td className="max-w-[420px] px-4 py-4 align-top">
-                        <p className="font-semibold leading-5 text-[var(--navy)]">{item.title}</p>
-                        <p className="mt-1 line-clamp-1 text-xs text-[var(--muted-ink)]">{item.source} · {item.description}</p>
-                      </td>
-                      <td className="px-3 py-4 align-top"><span className="topic-chip">{TOPICS[item.topic].short}</span></td>
-                      <td className="px-3 py-4 align-top"><MiniBar value={item.uncertaintyIndex} /></td>
-                      <td className="px-3 py-4 align-top"><span className="tabular-nums text-sm font-semibold">{formatPercent(item.overlap)}</span></td>
-                      <td className="px-4 py-4 text-right align-top"><ScorePill score={item.resonanceScore} /></td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-              {!visibleResults.length && (
-                <div className="grid min-h-56 place-items-center p-8 text-center">
-                  <div><Search className="mx-auto mb-2 text-slate-300" /><p className="font-semibold text-[var(--navy)]">Keine Treffer</p><p className="text-sm text-[var(--muted-ink)]">Filter oder Suchbegriff anpassen.</p></div>
-                </div>
-              )}
-            </div>
-
-            <aside className="bg-[var(--soft)]/55 p-5 lg:p-6">
-              {selected ? (
-                <ResultDetail item={selected} />
-              ) : (
-                <div className="grid h-full place-items-center text-center text-sm text-[var(--muted-ink)]">Eine Meldung auswählen.</div>
-              )}
-            </aside>
-          </div>
+        <section className="panel"><div className="panel-title"><div><h2>Einzelmeldungen prüfen</h2><p>{summary.high} von {summary.count} mit Zuspitzung ab 50/100 · {summary.review} mit Prüfhinweisen. Schwelle ist eine Arbeitshilfe, kein validierter Grenzwert.</p></div></div>
+          <div className="article-filters"><label htmlFor="source">Feed<NativeSelect id="source" value={source} onChange={(e) => setSource(e.target.value)}><option value="all">Alle Feeds</option>{report.feeds.map((f) => <option value={f.id} key={f.id}>{f.name}</option>)}</NativeSelect></label><label htmlFor="sort">Absteigend sortieren nach<NativeSelect id="sort" value={sort} onChange={(e) => setSort(e.target.value as Dimension)}>{DIMENSION_KEYS.map((k) => <option key={k} value={k}>{DIMENSIONS[k].short}</option>)}</NativeSelect></label><label className="search-label" htmlFor="search"><Search size={15} /> Textsuche<input id="search" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="In Titel und Kurztext" /></label></div>
+          <div className="article-grid"><div className="article-list">{visible.map((item) => <button type="button" key={item.id} onClick={() => setSelectedId(item.id)} aria-pressed={selected?.id === item.id} className={`article-button ${selected?.id === item.id ? 'selected' : ''}`}><span className="article-meta">{item.source} · {date(item.publishedAt)}</span><strong>{item.title}</strong><span className="article-values">{DIMENSIONS[sort].short} <b>{number(item.scores[sort])}/100</b> · {TOPICS[item.topic]}{item.review.length > 0 ? ' · prüfen' : ''}</span></button>)}{!visible.length && <p className="empty-inline">Keine Meldungen für diese Filter.</p>}</div><aside>{selected ? <ArticleDetail item={selected} /> : <p className="empty-inline">Wähle eine Meldung.</p>}</aside></div>
         </section>
+        <details className="panel methodology"><summary>Datengrundlage und Grenzen dieses Laufs</summary><p>Gleicher Zeitraum und dieselbe Obergrenze bedeuten nicht automatisch gleiche Artikelzahlen oder identische Ereignisse. Die Feeds liefern nur ihren aktuellen Ausschnitt; ältere Meldungen werden nicht aus einem Archiv nachgeladen. Artikel werden nach Datum sortiert und innerhalb jedes Feeds anhand von Link oder Titel dedupliziert.</p><Table><TableHeader><TableRow><TableHead>Feed</TableHead><TableHead>Geliefert</TableHead><TableHead>Dubletten</TableHead><TableHead>Ohne Datum</TableHead><TableHead>Zeitfilter ausgeschlossen</TableHead><TableHead>Nur Titel / gekürzt</TableHead></TableRow></TableHeader><TableBody>{report.feeds.map((f) => <TableRow key={f.id}><TableCell>{f.name}</TableCell><TableCell>{f.available}</TableCell><TableCell>{f.duplicates}</TableCell><TableCell>{f.undated}</TableCell><TableCell>{f.outsideWindow}</TableCell><TableCell>{report.items.filter((i) => i.feedId === f.id && (!i.description || i.truncated)).length}</TableCell></TableRow>)}</TableBody></Table></details>
+      </>}
 
-        <section className="mt-5 rounded-2xl border border-[var(--line)] bg-white">
-          <button onClick={() => setShowMethod((current) => !current)} className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left">
-            <div className="flex items-center gap-3">
-              <span className="grid size-8 place-items-center rounded-lg bg-[var(--soft)] text-[var(--teal)]"><Eye size={16} /></span>
-              <div><h2 className="font-display font-semibold text-[var(--navy)]">Methodik & Grenzen</h2><p className="text-xs text-[var(--muted-ink)]">Gewichtung, Prüflogik und Interpretation</p></div>
-            </div>
-            <ChevronDown className={`transition-transform ${showMethod ? 'rotate-180' : ''}`} size={18} />
-          </button>
-          {showMethod && <Methodology />}
-        </section>
-      </div>
-
-      <footer className="mx-auto flex max-w-[1500px] flex-col gap-2 px-5 pb-8 pt-2 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between lg:px-8">
-        <p>Entscheidungshilfe für Redaktions- und Forschungsarbeit — Ergebnisse stets kontextuell prüfen.</p>
-        <a href="https://docs.typesafe.ai/primitives" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-[var(--teal)] hover:underline">TypeSafe-Primitives <ExternalLink size={12} /></a>
-      </footer>
-    </main>
-  );
-}
-
-function Metric({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'high' | 'medium' | 'low' }) {
-  return (
-    <article className="flex items-end justify-between rounded-xl border border-[var(--line)] bg-white px-4 py-3.5">
-      <div><p className="text-xs font-semibold text-[var(--muted-ink)]">{label}</p><p className="mt-1 text-xs text-slate-400">{detail}</p></div>
-      <p className={`font-display text-3xl font-semibold tabular-nums metric-${tone}`}>{value}</p>
-    </article>
-  );
-}
-
-function MiniBar({ value }: { value: number }) {
-  return (
-    <div className="flex min-w-[118px] items-center gap-2">
-      <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-slate-200"><span className={`block h-full rounded-full bar-${scoreTone(value)}`} style={{ width: `${value}%` }} /></span>
-      <span className="w-7 text-right text-xs font-semibold tabular-nums">{value}</span>
+      <details className="panel methodology"><summary>Wie werden die Werte bestimmt?</summary><div className="method-grid">{DIMENSION_KEYS.map((key) => <div key={key}><h3>{DIMENSIONS[key].label}</h3><ol start={0}>{DIMENSIONS[key].levels.map((level, i) => <li key={level}><b>{i * 25}</b> {level}</li>)}</ol></div>)}</div><p>JEV beantwortet jede Frage getrennt. Scores liegen zwischen den fünf Stufen und werden linear auf 0–100 umgerechnet. Es gibt keinen zusammengesetzten AfD- oder Objektivitätswert. Modellkonfidenz beschreibt die Eindeutigkeit der Antwortverteilung und ist kein empirischer Korrektheitsnachweis. Einzelkonfidenzen unter 55 % und widersprüchliche Textbelege führen zu Prüfhinweisen.</p><p>JEV erhält Titel und Kurztext ohne separate Quellenmetadaten. Im Text selbst können Quellen erkennbar bleiben. Die ausgewählten Textstellen stammen wörtlich aus den Eingaben; ihre Auswahl ist ebenfalls eine Modellentscheidung. Alle Fragen, Antworten, Verteilungen und die tatsächlich verwendete Modellversion sind im Export enthalten.</p><p>Die Methodik ist eine explorative Inhaltsanalyse und noch nicht gegen menschlich bewertete Artikel kalibriert. Aussagen über Objektivität, tatsächliche Verunsicherung oder Wahlverhalten benötigen zusätzliche Daten. Werte aus Methodik 1 und 2 sind nicht vergleichbar.</p></details>
+      <footer>ResonanzRadar · Methodik {METHOD_VERSION}<a href="https://docs.typesafe.ai/primitives" target="_blank" rel="noreferrer">TypeSafe: Bewertung und Konfidenz <ExternalLink size={13} /></a></footer>
     </div>
-  );
+  </main>;
 }
 
-function ScorePill({ score }: { score: number }) {
-  return <span className={`score-pill score-${scoreTone(score)}`}>{score}</span>;
-}
-
-function ResultDetail({ item }: { item: ResultItem }) {
-  const dimensions = [
-    ['Bedrohung', item.dimensions.threat / 4],
-    ['Kontrollverlust', item.dimensions.controlLoss / 4],
-    ['Staatsversagen', item.dimensions.governmentFailure],
-    ['Alltagsnähe', item.dimensions.personalProximity / 3],
-    ['Schuldzuschreibung', item.dimensions.blame],
-    ['Lösungslücke', item.dimensions.solutionGap],
-    ['Polarisierung', item.dimensions.polarization / 3],
-  ] as const;
-
-  return (
-    <div>
-      <div className="flex items-start justify-between gap-4">
-        <div><p className="text-[11px] font-bold uppercase tracking-[0.13em] text-[var(--teal)]">Signaldetail</p><h3 className="mt-1 font-display text-xl font-semibold leading-6 text-[var(--navy)]">{item.title}</h3></div>
-        <div className={`score-orbit orbit-${scoreTone(item.resonanceScore)}`}><strong>{item.resonanceScore}</strong><span>/100</span></div>
-      </div>
-      <p className="mt-3 text-sm leading-5 text-[var(--muted-ink)]">{item.description}</p>
-      <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
-        <span className="topic-chip">{TOPICS[item.topic].label}</span>
-        <span className="text-slate-500">Themen-Konfidenz {formatPercent(item.topicConfidence)}</span>
-        {item.link && <a href={item.link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 font-semibold text-[var(--teal)] hover:underline">Quelle <ExternalLink size={11} /></a>}
-      </div>
-
-      <div className="my-5 grid grid-cols-2 gap-2">
-        <div className="rounded-xl border border-[var(--line)] bg-white p-3"><p className="text-[11px] font-semibold text-slate-500">Verunsicherung</p><p className="mt-1 font-display text-2xl font-semibold text-[var(--navy)]">{item.uncertaintyIndex}<span className="text-sm text-slate-400">/100</span></p></div>
-        <div className="rounded-xl border border-[var(--line)] bg-white p-3"><p className="text-[11px] font-semibold text-slate-500">AfD-Agenda-Nähe</p><p className="mt-1 font-display text-2xl font-semibold text-[var(--navy)]">{formatPercent(item.overlap)}</p></div>
-      </div>
-
-      <div className="space-y-3">
-        {dimensions.map(([label, value]) => (
-          <div key={label}>
-            <div className="mb-1 flex items-center justify-between text-xs"><span className="font-medium text-slate-600">{label}</span><span className="font-semibold tabular-nums text-[var(--navy)]">{Math.round(value * 100)} %</span></div>
-            <div className="h-1.5 overflow-hidden rounded-full bg-slate-200"><div className="h-full rounded-full bg-[var(--teal)]" style={{ width: `${value * 100}%` }} /></div>
-          </div>
-        ))}
-      </div>
-
-      <div className="mt-5 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-900">
-        <p className="flex items-center gap-1.5 font-bold"><Check size={14} /> Interpretation</p>
-        <p className="mt-1">{item.resonanceScore >= 65 ? 'Mehrere verunsichernde Frames treffen deutlich auf ein AfD-nahes Themenfeld.' : item.resonanceScore >= 40 ? 'Einzelne verunsichernde Frames und thematische Überschneidungen sind erkennbar.' : 'Wenig verunsichernde Rahmung oder nur geringe thematische Überschneidung.'}</p>
-        {item.confidence < 0.55 && <p className="mt-1 font-semibold text-amber-800">Niedrige Modellkonfidenz: manuelle Prüfung empfohlen.</p>}
-      </div>
-    </div>
-  );
-}
-
-function Methodology() {
-  return (
-    <div className="grid gap-6 border-t border-[var(--line)] px-5 py-5 text-sm leading-6 text-[var(--muted-ink)] md:grid-cols-2 xl:grid-cols-4">
-      <div><h3 className="font-semibold text-[var(--navy)]">1. Atomare JEV-Fragen</h3><p className="mt-1">Thema, Bedrohung, Kontrollverlust, Staatsversagen, Alltagsnähe, Schuldzuschreibung, Lösungslücke und Polarisierung werden unabhängig bewertet. Das vermeidet eine einzige überladene „AfD-Wirkung“-Frage.</p></div>
-      <div><h3 className="font-semibold text-[var(--navy)]">2. Transparente Komposition</h3><p className="mt-1">Der Verunsicherungsindex gewichtet sieben beobachtbare Frames. Das Resonanzsignal kombiniert ihn zu 75 % mit 25 % AfD-Agenda-Nähe. Gewichte liegen im Code, nicht in einem versteckten Prompt.</p></div>
-      <div><h3 className="font-semibold text-[var(--navy)]">3. Klare Grenze</h3><p className="mt-1">Gemessen wird nur Titel plus Kurzbeschreibung. Keine Aussage über Wahrheit, Reichweite, individuelle Emotionen, Kausalität oder tatsächliche Wahlentscheidung. Niedrige Konfidenzen gehören in eine manuelle Prüfung.</p></div>
-      <div><h3 className="font-semibold text-[var(--navy)]">4. Fairer Feedvergleich</h3><p className="mt-1">Jeder Feed liefert dieselbe maximale Zahl der neuesten Meldungen. Verglichen werden normalisierte Mittelwerte und Anteile. Das zeigt Unterschiede in dieser Stichprobe, nicht die dauerhafte Haltung oder Gesamtqualität eines Mediums.</p></div>
-    </div>
-  );
+function Score({ value }: { value: number | null }) { return <span className="score-cell"><b>{number(value)}</b>{value !== null && <span className="score-track"><span style={{ width: `${value}%` }} /></span>}</span>; }
+function ArticleDetail({ item }: { item: AnalysisItem }) {
+  const voice: Record<string, string> = { absent: 'Keine narrative Aussage', asserted: 'Bekräftigt / unmarkiert', attributed: 'Zugeschriebene Fremdposition', challenged: 'Relativiert / widerlegt', unclear: 'Sprecherhaltung unklar' };
+  return <div className="article-detail"><p className="eyebrow">ORIGINALTEXT & EINORDNUNG</p><h3>{item.title}</h3><p className="article-description">{item.description || 'Der Feed enthält keinen Kurztext.'}</p><p className="fine">{item.source} · {date(item.publishedAt)}{item.link && <> · <a href={item.link} target="_blank" rel="noreferrer">Artikel öffnen <ExternalLink size={12} /></a></>}</p><div className="detail-scores">{DIMENSION_KEYS.map((key) => <div key={key}><div><strong>{DIMENSIONS[key].label}</strong><small>Modellkonfidenz {Math.round(item.confidences[key] * 100)} %</small></div><Score value={item.scores[key]} /></div>)}</div><p className="fine">0–100 misst Ausprägung, keine Eintrittswahrscheinlichkeit.</p><div className="evidence"><h4>Ausgewählte Textstellen</h4>{(['sensationalism', 'political'] as const).map((key) => <div key={key}><strong>{DIMENSIONS[key].label}</strong>{item.evidence[key] ? <blockquote>{item.evidence[key]}</blockquote> : <p className="fine">Keine passende Stelle ausgewählt.</p>}<small>Auswahl-Konfidenz {Math.round(item.confidences[`${key}Evidence`] * 100)} %</small></div>)}</div><div className="narrative-detail"><h4>Politisches Narrativ</h4><p>{NARRATIVES[item.narrative]}</p><p className="fine">{voice[item.narrativeVoice]} · {item.geography === 'germany' ? 'Deutschlandbezug' : item.geography === 'foreign' ? 'Ausland ohne genannten Deutschlandbezug' : 'Geografischer Bezug unklar'}</p></div>{item.review.length > 0 && <div className="notice"><strong>Manuell prüfen</strong><ul>{item.review.map((r) => <li key={r}>{r}</li>)}</ul></div>}<details><summary>Modellantworten anzeigen</summary><pre>{JSON.stringify(item.raw, null, 2)}</pre></details></div>;
 }
