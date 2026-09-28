@@ -28,7 +28,7 @@ export type AnalysisItem = FeedItem & {
 };
 export type FeedInfo = { id: string; url: string; name: string; available: number; duplicates: number; undated: number; outsideWindow: number; eligible: number; selected: number; failed: number; error?: string };
 export type Report = { method: string; startedAt: string; completedAt: string; hours: number; limit: number; feeds: FeedInfo[]; items: AnalysisItem[]; models: string[]; questions: Record<string, Record<string, Question>>; warnings: string[] };
-export type AnalysisEvent = { type: 'progress'; done: number; total: number; message: string } | { type: 'complete'; report: Report } | { type: 'error'; message: string };
+export type AnalysisEvent = { type: 'progress'; done: number; total: number; message: string } | { type: 'complete'; report: Report } | { type: 'error'; message: string } | { type: 'debug'; batch: import('./debug').DebugBatch };
 
 // Candidates are exact input spans. The model chooses an ID; it cannot invent a quotation.
 export function snippets(item: Pick<FeedItem, 'title' | 'description'>) {

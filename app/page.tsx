@@ -5,10 +5,12 @@ import { Radio, Plus, X, Download, ExternalLink, LoaderCircle, ArrowRight, Searc
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table';
 import { NativeSelect } from '@/components/ui/native-select';
 import { Progress } from '@/components/ui/progress';
+import { Checkbox } from '@/components/ui/checkbox';
+import { recordBatch, redactKey, updateDebugRun, type DebugRun } from '@/lib/debug';
 import { DIMENSIONS, DIMENSION_KEYS, METHOD_VERSION, NARRATIVES, TOPICS, matchedTopics, summarize, type AnalysisEvent, type AnalysisItem, type Dimension, type Report } from '@/lib/analysis';
 
 const PRESETS = ['https://www.tagesschau.de/infoservices/alle-meldungen-100~rss2.xml', 'https://www.bild.de/feed/news.xml'];
-type RunInput = { apiKey: string; feedUrls: string[]; limit: number; hours: number };
+type RunInput = { apiKey: string; feedUrls: string[]; limit: number; hours: number; debug?: boolean };
 type ModelContext = { registerTool(tool: { name: string; description: string; inputSchema: object; annotations: object; execute(input: unknown): Promise<unknown> }, options: { signal: AbortSignal }): void | Promise<void> };
 const number = (value: number | null) => value === null ? '—' : String(Math.round(value));
 const date = (value?: string) => value ? new Date(value).toLocaleString('de-DE', { timeZone: 'Europe/Berlin', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'ohne Datum';
@@ -18,6 +20,8 @@ export default function Home() {
   const [feedUrls, setFeedUrls] = useState(PRESETS);
   const [limit, setLimit] = useState(30);
   const [hours, setHours] = useState(72);
+  const [debugEnabled, setDebugEnabled] = useState(true);
+  const [debugRun, setDebugRun] = useState<DebugRun | null>(null);
   const [report, setReport] = useState<Report | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -36,6 +40,7 @@ export default function Home() {
     if (!input.apiKey.trim()) throw new Error('Bitte deinen TypeSafe API-Key eintragen.');
     if (input.feedUrls.length < 1 || input.feedUrls.length > 5 || new Set(input.feedUrls).size !== input.feedUrls.length) throw new Error('Bitte eine bis fünf unterschiedliche Feeds eintragen.');
     running.current = true; setBusy(true); setError(''); setProgress({ done: 0, total: 0, message: 'Analyse wird vorbereitet …' });
+    setDebugRun(input.debug ? redactKey({ format: 'resonanzradar-debug-v1', method: METHOD_VERSION, startedAt: new Date().toISOString(), status: 'running', settings: { feedUrls: input.feedUrls, limit: input.limit, hours: input.hours }, batches: [] } as DebugRun, input.apiKey.trim()) : null);
     const abort = new AbortController(); controller.current = abort;
     try {
       const response = await fetch('/api/analyze', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input), signal: abort.signal });
@@ -48,6 +53,7 @@ export default function Home() {
         for (const line of lines) {
           if (!line.trim()) continue;
           const event = JSON.parse(line) as AnalysisEvent;
+          if (event.type === 'debug') setDebugRun((current) => current ? recordBatch(current, event.batch) : null);
           if (event.type === 'error') throw new Error(event.message);
           if (event.type === 'progress') setProgress(event);
           if (event.type === 'complete') completed = event.report;
@@ -56,9 +62,11 @@ export default function Home() {
       }
       if (!completed) throw new Error('Die Verbindung wurde vor Abschluss unterbrochen. Bitte erneut starten.');
       setReport(completed); setSelectedId(completed.items[0]?.id ?? ''); setTopic('all'); setSource('all'); setGeography('all'); setQuery('');
+      setDebugRun((current) => current ? { ...current, status: 'completed', completedAt: new Date().toISOString(), report: completed! } : null);
       return completed;
     } catch (caught) {
-      const message = abort.signal.aborted ? 'Analyse abgebrochen. Bereits gestartete API-Anfragen können Kosten verursachen.' : caught instanceof Error ? caught.message : 'Analyse fehlgeschlagen.';
+      const message = redactKey(abort.signal.aborted ? 'Analyse abgebrochen. Bereits gestartete API-Anfragen können Kosten verursachen.' : caught instanceof Error ? caught.message : 'Analyse fehlgeschlagen.', input.apiKey.trim());
+      setDebugRun(updateDebugRun.bind(null, { status: abort.signal.aborted ? 'cancelled' : 'failed', completedAt: new Date().toISOString(), error: message }));
       setError(message); throw new Error(message);
     } finally { setBusy(false); running.current = false; controller.current = null; }
   }, []);
@@ -87,13 +95,18 @@ export default function Home() {
 
   async function submit(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
-    try { await run({ apiKey: apiKey.trim(), feedUrls: feedUrls.map((u) => u.trim()).filter(Boolean), limit, hours }); }
+    try { await run({ apiKey: apiKey.trim(), feedUrls: feedUrls.map((u) => u.trim()).filter(Boolean), limit, hours, debug: debugEnabled }); }
     catch (caught) { setError(caught instanceof Error ? caught.message : 'Analyse fehlgeschlagen.'); }
   }
   function download() {
     if (!report) return;
     const blob = new Blob([JSON.stringify({ ...report, summaries: report.feeds.map((f) => ({ feed: f.id, ...summarize(report.items.filter((i) => i.feedId === f.id)) })), matchedTopics: matchedTopics(report.items, report.feeds.map((f) => f.id)) }, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `resonanzradar-v${report.method}-${report.startedAt.slice(0, 10)}.json`; a.click(); URL.revokeObjectURL(url);
+  }
+  function downloadDebug() {
+    if (!debugRun) return;
+    const blob = new Blob([JSON.stringify({ ...debugRun, exportedAt: new Date().toISOString(), privacy: 'No API key or authorization headers. Article texts, feed URLs, exact request bodies and provider response text are included. Known key occurrences are replaced with [REDACTED]. No server-side debug persistence. Unfinished batches may have no response.' }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `resonanzradar-debug-${debugRun.startedAt.replace(/[:.]/g, '-')}.json`; a.click(); URL.revokeObjectURL(url);
   }
 
   return <main>
@@ -107,10 +120,12 @@ export default function Home() {
             <p className="fine">Bis zu 5 Feeds. Die vorbelegten URLs stammen aus deinem Vergleich.</p>
           </div>
           <div className="settings"><label htmlFor="key">TypeSafe API-Key<input id="key" type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="Deinen API-Key eintragen" /></label><div className="settings-row"><label htmlFor="hours">Gemeinsamer Zeitraum<NativeSelect id="hours" value={hours} onChange={(e) => setHours(Number(e.target.value))}><option value={24}>Letzte 24 Stunden</option><option value={72}>Letzte 72 Stunden</option><option value={168}>Letzte 7 Tage</option><option value={0}>Alle gelieferten Artikel</option></NativeSelect></label><label htmlFor="limit">Max. Artikel je Feed<NativeSelect id="limit" value={limit} onChange={(e) => setLimit(Number(e.target.value))}>{[5, 8, 12, 20, 30, 40].map((n) => <option key={n} value={n}>{n}</option>)}</NativeSelect></label></div><button className="primary-button" type="submit">{busy ? <LoaderCircle size={17} className="animate-spin" /> : <GitCompareArrows size={17} />}{busy ? 'Analyse läuft' : 'Vergleich starten'}<ArrowRight size={16} /></button><p className="fine">Bis zu {limit * feedUrls.filter(Boolean).length} Artikel. Titel und Kurztexte werden an TypeSafe gesendet. Der Key wird von dieser App nicht gespeichert.</p></div>
-        </div></fieldset>
+        </div><div className="debug-option"><div><Checkbox id="debug" checked={debugEnabled} onCheckedChange={setDebugEnabled} /><label htmlFor="debug">JEV-Debug für diesen Lauf mitschreiben</label></div><p className="fine">Anfragen, Originalantworten und Fehler für die Fehlersuche. Kein API-Key und keine Authorization-Header. Nur im Arbeitsspeicher, bis du neu lädst oder den nächsten Lauf startest. Keine zusätzlichen JEV-Aufrufe.</p></div></fieldset>
         {busy && <div className="run-status"><div><output aria-live="polite">{progress.message}</output><button type="button" className="text-button" onClick={() => controller.current?.abort()}>Abbrechen</button></div><Progress aria-label="Analysefortschritt" value={progress.total ? 100 * progress.done / progress.total : null} /></div>}
         {error && <p role="alert" className="error-message">{error}</p>}
       </form>
+
+      {debugRun && <section className="panel debug-panel" aria-label="JEV-Debug"><div className="results-heading"><div><h2>JEV-Debug zum Weitergeben</h2><p className="fine">Lauf {date(debugRun.startedAt)} · {{ running: 'läuft', completed: 'abgeschlossen', failed: 'fehlgeschlagen', cancelled: 'abgebrochen' }[debugRun.status]} · {debugRun.batches.filter((b) => b.response).length} Antworten aus {debugRun.batches.length} gestarteten Anfragen</p></div><button type="button" className="secondary-button" onClick={downloadDebug}><Download size={16} /> Debug-JSON herunterladen</button></div><p>Nach dem Vergleich herunterladen und die JSON-Datei hier im Chat anhängen. Sie enthält Artikeltexte, Feed-Adressen, die tatsächlich gesendeten Fragen, JEV-Rohantworten und Prüfungsfehler. Vor dem Weitergeben bei Bedarf ansehen.</p><p className="fine">Auch bei Fehlern oder Abbruch verfügbar: Der Export enthält alle bis dahin empfangenen Daten. Offene Anfragen können ohne Antwort bleiben. Ein neuer Lauf ersetzt diesen Mitschnitt; beim Neuladen geht er verloren.</p><details><summary>Mitschnitt ansehen</summary>{debugRun.batches.length ? debugRun.batches.map((batch) => <details key={batch.id}><summary>Anfrage {batch.id} · {batch.articles.length} Artikel · {batch.response ? `HTTP ${batch.response.status}` : 'keine Antwort empfangen'}{batch.durationMs !== undefined ? ` · ${(batch.durationMs / 1000).toFixed(1)} s` : ''}{batch.error || batch.validation.length ? ' · Prüfhinweise' : ''}</summary><pre>{JSON.stringify(batch, null, 2)}</pre></details>) : <p className="fine">Noch kein JEV-Aufruf gestartet.</p>}</details></section>}
 
       <div className="method-note"><Info size={19} /><p><strong>Ein niedriger Wert ist kein Objektivitätsurteil.</strong> Die Messwerte beschreiben Texte. Sie belegen weder journalistische Qualität noch eine Wirkung auf die AfD-Wahlabsicht. Das neue Schema ersetzt den bisherigen, unkalibrierten Gesamtwert.</p></div>
 
