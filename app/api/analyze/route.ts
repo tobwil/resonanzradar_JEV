@@ -1,5 +1,6 @@
 type FeedItem = {
   id: string;
+  feedId: string;
   title: string;
   description: string;
   source: string;
@@ -79,7 +80,7 @@ function tag(block: string, names: string[]) {
   return '';
 }
 
-function parseFeed(xml: string, sourceUrl: string, limit: number): FeedItem[] {
+function parseFeed(xml: string, sourceUrl: string, limit: number, feedId: string): FeedItem[] {
   const channelTitle = tag(xml, ['title']) || new URL(sourceUrl).hostname;
   const itemBlocks = [...xml.matchAll(/<item\b[^>]*>([\s\S]*?)<\/item>/gi)].map((match) => match[1]);
   const entryBlocks = [...xml.matchAll(/<entry\b[^>]*>([\s\S]*?)<\/entry>/gi)].map((match) => match[1]);
@@ -89,7 +90,8 @@ function parseFeed(xml: string, sourceUrl: string, limit: number): FeedItem[] {
     const linkText = tag(block, ['link']);
     const href = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*\/?\s*>/i)?.[1];
     return {
-      id: `item-${index + 1}`,
+      id: `${feedId}-item-${index + 1}`,
+      feedId,
       title: tag(block, ['title']) || 'Ohne Titel',
       description: tag(block, ['description', 'summary', 'content', 'encoded']).slice(0, 1800),
       source: channelTitle,
@@ -224,29 +226,39 @@ async function analyzeBatch(feedItems: FeedItem[], apiKey: string) {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as { apiKey?: string; feedUrl?: string; limit?: number };
+    const body = (await request.json()) as { apiKey?: string; feedUrl?: string; feedUrls?: string[]; limit?: number };
     const apiKey = body.apiKey?.trim();
-    const feedUrl = body.feedUrl?.trim();
+    const rawFeedUrls = Array.isArray(body.feedUrls) ? body.feedUrls : body.feedUrl ? [body.feedUrl] : [];
+    const feedUrls = [...new Set(rawFeedUrls.map((url) => url.trim()).filter(Boolean))];
     const limit = Math.min(40, Math.max(1, Number(body.limit) || 8));
 
-    if (!apiKey || !feedUrl) return Response.json({ error: 'API-Key und Feed-URL sind erforderlich.' }, { status: 400 });
+    if (!apiKey || !feedUrls.length) return Response.json({ error: 'API-Key und mindestens eine Feed-URL sind erforderlich.' }, { status: 400 });
+    if (feedUrls.length > 5) return Response.json({ error: 'Es können höchstens fünf Feeds verglichen werden.' }, { status: 400 });
 
-    let parsedUrl: URL;
-    try { parsedUrl = new URL(feedUrl); } catch { return Response.json({ error: 'Die Feed-URL ist ungültig.' }, { status: 400 }); }
-    if (!['http:', 'https:'].includes(parsedUrl.protocol) || isUnsafeHost(parsedUrl.hostname)) {
-      return Response.json({ error: 'Diese Feed-Adresse ist aus Sicherheitsgründen nicht zulässig.' }, { status: 400 });
+    const parsedUrls: URL[] = [];
+    for (const feedUrl of feedUrls) {
+      let parsedUrl: URL;
+      try { parsedUrl = new URL(feedUrl); } catch { return Response.json({ error: `Ungültige Feed-URL: ${feedUrl}` }, { status: 400 }); }
+      if (!['http:', 'https:'].includes(parsedUrl.protocol) || isUnsafeHost(parsedUrl.hostname)) {
+        return Response.json({ error: `Diese Feed-Adresse ist aus Sicherheitsgründen nicht zulässig: ${feedUrl}` }, { status: 400 });
+      }
+      parsedUrls.push(parsedUrl);
     }
 
-    const feedResponse = await fetch(parsedUrl.toString(), {
-      headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9', 'User-Agent': 'ResonanzRadar/1.0' },
-      signal: AbortSignal.timeout(12000),
-    });
-    if (!feedResponse.ok) return Response.json({ error: `Der Feed konnte nicht geladen werden (${feedResponse.status}).` }, { status: 400 });
+    const feedGroups = await Promise.all(parsedUrls.map(async (parsedUrl, index) => {
+      const feedResponse = await fetch(parsedUrl.toString(), {
+        headers: { Accept: 'application/rss+xml, application/atom+xml, application/xml, text/xml;q=0.9', 'User-Agent': 'ResonanzRadar/1.0' },
+        signal: AbortSignal.timeout(12000),
+      });
+      if (!feedResponse.ok) throw new JevRequestError(`Feed ${index + 1} konnte nicht geladen werden (${feedResponse.status}).`, 400);
 
-    const xml = await feedResponse.text();
-    if (xml.length > 2_000_000) return Response.json({ error: 'Der Feed ist größer als 2 MB.' }, { status: 413 });
-    const feedItems = parseFeed(xml, parsedUrl.toString(), limit).filter((item) => item.title || item.description);
-    if (!feedItems.length) return Response.json({ error: 'Im Feed wurden keine RSS- oder Atom-Meldungen gefunden.' }, { status: 422 });
+      const xml = await feedResponse.text();
+      if (xml.length > 2_000_000) throw new JevRequestError(`Feed ${index + 1} ist größer als 2 MB.`, 413);
+      const items = parseFeed(xml, parsedUrl.toString(), limit, `feed-${index + 1}`).filter((item) => item.title || item.description);
+      if (!items.length) throw new JevRequestError(`In Feed ${index + 1} wurden keine RSS- oder Atom-Meldungen gefunden.`, 422);
+      return items;
+    }));
+    const feedItems = feedGroups.flat();
 
     const batches: FeedItem[][] = [];
     for (let start = 0; start < feedItems.length; start += 10) batches.push(feedItems.slice(start, start + 10));
@@ -257,7 +269,7 @@ export async function POST(request: Request) {
       items.push(...groupResults.flat());
     }
 
-    return Response.json({ model: 'jev-latest', batches: batches.length, items });
+    return Response.json({ model: 'jev-latest', feeds: feedGroups.length, perFeedLimit: limit, batches: batches.length, items });
   } catch (error) {
     if (error instanceof JevRequestError) return Response.json({ error: error.message }, { status: error.status });
     if (error instanceof Error && error.name === 'TimeoutError') return Response.json({ error: 'Die Anfrage hat zu lange gedauert. Bitte erneut versuchen.' }, { status: 504 });

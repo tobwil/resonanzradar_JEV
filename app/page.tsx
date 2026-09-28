@@ -10,12 +10,15 @@ import {
   Download,
   ExternalLink,
   Eye,
+  GitCompareArrows,
   KeyRound,
   LoaderCircle,
+  Plus,
   Radio,
   Search,
   ShieldCheck,
   Sparkles,
+  X,
 } from 'lucide-react';
 
 type MainTopic =
@@ -31,6 +34,7 @@ type MainTopic =
 
 type ResultItem = {
   id: string;
+  feedId: string;
   title: string;
   description: string;
   source: string;
@@ -88,10 +92,11 @@ const TOPICS: Record<MainTopic, { label: string; short: string }> = {
 const SAMPLE_RESULTS: ResultItem[] = [
   {
     id: 'demo-1',
+    feedId: 'demo-a',
     title: 'Kommunen warnen vor Überlastung bei Unterbringung und Betreuung',
     description:
       'Mehrere Städte berichten von knappen Kapazitäten und fordern schnellere Entscheidungen von Bund und Ländern.',
-    source: 'Beispielquelle',
+    source: 'Nachrichtenfeed A',
     topic: 'migration_asylum',
     topicConfidence: 0.93,
     uncertaintyIndex: 72,
@@ -110,10 +115,11 @@ const SAMPLE_RESULTS: ResultItem[] = [
   },
   {
     id: 'demo-2',
+    feedId: 'demo-b',
     title: 'Energiepreise steigen zum Winter leicht an',
     description:
       'Verbraucherzentralen rechnen mit moderaten Mehrkosten und nennen konkrete Sparmöglichkeiten für Haushalte.',
-    source: 'Beispielquelle',
+    source: 'Nachrichtenfeed B',
     topic: 'energy_climate',
     topicConfidence: 0.91,
     uncertaintyIndex: 38,
@@ -132,10 +138,11 @@ const SAMPLE_RESULTS: ResultItem[] = [
   },
   {
     id: 'demo-3',
+    feedId: 'demo-a',
     title: 'Stadt eröffnet neue Bibliothek im Zentrum',
     description:
       'Das Gebäude bietet mehr Arbeitsplätze, längere Öffnungszeiten und ein erweitertes Bildungsprogramm.',
-    source: 'Beispielquelle',
+    source: 'Nachrichtenfeed A',
     topic: 'public_services_state',
     topicConfidence: 0.89,
     uncertaintyIndex: 8,
@@ -172,7 +179,7 @@ function formatPercent(value: number) {
 
 export default function Home() {
   const [apiKey, setApiKey] = useState('');
-  const [feedUrl, setFeedUrl] = useState('');
+  const [feedUrls, setFeedUrls] = useState(['']);
   const [limit, setLimit] = useState('8');
   const [results, setResults] = useState<ResultItem[]>(SAMPLE_RESULTS);
   const [selectedId, setSelectedId] = useState(SAMPLE_RESULTS[0].id);
@@ -206,6 +213,23 @@ export default function Home() {
     : 0;
   const strongSignals = results.filter((item) => item.resonanceScore >= 65).length;
   const lowConfidence = results.filter((item) => item.confidence < 0.55).length;
+  const feedComparison = useMemo(() => {
+    const groups = new Map<string, ResultItem[]>();
+    for (const item of results) groups.set(item.feedId, [...(groups.get(item.feedId) ?? []), item]);
+
+    return [...groups.entries()]
+      .map(([feedId, items]) => ({
+        feedId,
+        source: items[0]?.source ?? 'Unbekannter Feed',
+        count: items.length,
+        resonance: Math.round(items.reduce((sum, item) => sum + item.resonanceScore, 0) / items.length),
+        uncertainty: Math.round(items.reduce((sum, item) => sum + item.uncertaintyIndex, 0) / items.length),
+        overlap: items.reduce((sum, item) => sum + item.overlap, 0) / items.length,
+        strongShare: items.filter((item) => item.resonanceScore >= 65).length / items.length,
+        confidence: items.reduce((sum, item) => sum + item.confidence, 0) / items.length,
+      }))
+      .sort((a, b) => b.resonance - a.resonance);
+  }, [results]);
 
   useEffect(() => {
     const context = (document as Document & { modelContext?: WebMcpContext }).modelContext;
@@ -216,24 +240,32 @@ export default function Home() {
       context.registerTool(
         {
           name: 'analyze_news_feed',
-          title: 'Nachrichtenfeed analysieren',
+          title: 'Nachrichtenfeeds vergleichen',
           description:
-            'Analysiert bis zu 40 Meldungen eines öffentlichen RSS- oder Atom-Feeds mit JEV und aktualisiert die sichtbare ResonanzRadar-Auswertung.',
+            'Analysiert und vergleicht bis zu fünf öffentliche RSS- oder Atom-Feeds mit jeweils bis zu 40 Meldungen und aktualisiert die sichtbare ResonanzRadar-Auswertung.',
           inputSchema: {
             type: 'object',
             properties: {
               apiKey: { type: 'string', minLength: 1, description: 'TypeSafe API-Key; wird nicht gespeichert.' },
-              feedUrl: { type: 'string', format: 'uri', description: 'Öffentliche RSS- oder Atom-URL.' },
+              feedUrls: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 5,
+                uniqueItems: true,
+                items: { type: 'string', format: 'uri' },
+                description: 'Eine bis fünf öffentliche RSS- oder Atom-URLs.',
+              },
               limit: { type: 'integer', minimum: 1, maximum: 40, default: 8 },
             },
-            required: ['apiKey', 'feedUrl'],
+            required: ['apiKey', 'feedUrls'],
             additionalProperties: false,
           },
           annotations: { readOnlyHint: true, untrustedContentHint: true },
           async execute(input) {
-            const values = input as { apiKey?: unknown; feedUrl?: unknown; limit?: unknown };
+            const values = input as { apiKey?: unknown; feedUrls?: unknown; limit?: unknown };
             if (typeof values.apiKey !== 'string' || !values.apiKey.trim()) throw new Error('apiKey ist erforderlich.');
-            if (typeof values.feedUrl !== 'string' || !values.feedUrl.trim()) throw new Error('feedUrl ist erforderlich.');
+            if (!Array.isArray(values.feedUrls) || values.feedUrls.length < 1 || values.feedUrls.length > 5 || values.feedUrls.some((url) => typeof url !== 'string' || !url.trim())) throw new Error('feedUrls muss eine bis fünf URLs enthalten.');
+            const requestedFeedUrls = [...new Set(values.feedUrls.map((url) => String(url).trim()))];
             const requestedLimit = values.limit === undefined ? 8 : Number(values.limit);
             if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 40) throw new Error('limit muss zwischen 1 und 40 liegen.');
 
@@ -243,16 +275,16 @@ export default function Home() {
               const response = await fetch('/api/analyze', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ apiKey: values.apiKey.trim(), feedUrl: values.feedUrl.trim(), limit: requestedLimit }),
+                body: JSON.stringify({ apiKey: values.apiKey.trim(), feedUrls: requestedFeedUrls, limit: requestedLimit }),
               });
               const payload = (await response.json()) as AnalyzePayload;
               if (!response.ok) throw new Error(payload.error || 'Die Auswertung ist fehlgeschlagen.');
               setResults(payload.items);
               setSelectedId(payload.items[0]?.id ?? '');
               setIsDemo(false);
-              setFeedUrl(values.feedUrl.trim());
+              setFeedUrls(requestedFeedUrls);
               setLimit(String(requestedLimit));
-              return { analyzed: payload.items.length, model: payload.model, highestResonance: Math.max(...payload.items.map((item: ResultItem) => item.resonanceScore)) };
+              return { feeds: requestedFeedUrls.length, analyzed: payload.items.length, model: payload.model, highestResonance: Math.max(...payload.items.map((item: ResultItem) => item.resonanceScore)) };
             } catch (toolError) {
               const message = toolError instanceof Error ? toolError.message : 'Die Auswertung ist fehlgeschlagen.';
               setError(message);
@@ -269,12 +301,30 @@ export default function Home() {
     return () => lifecycle.abort();
   }, []);
 
+  function updateFeedUrl(index: number, value: string) {
+    setFeedUrls((current) => current.map((url, itemIndex) => itemIndex === index ? value : url));
+  }
+
+  function addFeedUrl() {
+    setFeedUrls((current) => current.length < 5 ? [...current, ''] : current);
+  }
+
+  function removeFeedUrl(index: number) {
+    setFeedUrls((current) => current.length > 1 ? current.filter((_, itemIndex) => itemIndex !== index) : current);
+  }
+
   async function analyzeFeed(event: SyntheticEvent<HTMLFormElement>) {
     event.preventDefault();
     setError('');
 
-    if (!apiKey.trim() || !feedUrl.trim()) {
-      setError('Bitte API-Key und RSS- oder Atom-URL eintragen.');
+    const activeFeedUrls = feedUrls.map((url) => url.trim()).filter(Boolean);
+
+    if (!apiKey.trim() || !activeFeedUrls.length) {
+      setError('Bitte API-Key und mindestens eine RSS- oder Atom-URL eintragen.');
+      return;
+    }
+    if (new Set(activeFeedUrls).size !== activeFeedUrls.length) {
+      setError('Jeder Feed darf nur einmal eingetragen werden.');
       return;
     }
 
@@ -285,7 +335,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           apiKey: apiKey.trim(),
-          feedUrl: feedUrl.trim(),
+          feedUrls: activeFeedUrls,
           limit: Number(limit),
         }),
       });
@@ -308,7 +358,7 @@ export default function Home() {
 
   function exportResults() {
     const blob = new Blob(
-      [JSON.stringify({ generatedAt: new Date().toISOString(), items: results }, null, 2)],
+      [JSON.stringify({ generatedAt: new Date().toISOString(), feeds: feedComparison, items: results }, null, 2)],
       { type: 'application/json' },
     );
     const url = URL.createObjectURL(blob);
@@ -374,20 +424,35 @@ export default function Home() {
                 aria-label="TypeSafe API-Key"
               />
             </label>
-            <label>
-              <span className="mb-1.5 block text-xs font-semibold text-[var(--navy)]">RSS- oder Atom-Feed</span>
-              <input
-                type="url"
-                value={feedUrl}
-                onChange={(event) => setFeedUrl(event.target.value)}
-                placeholder="https://…/feed.xml"
-                className="field"
-                aria-label="RSS- oder Atom-Feed URL"
-              />
-            </label>
-            <div className="grid grid-cols-[86px_1fr] items-end gap-2">
+            <div className="sm:col-span-2">
+              <div className="mb-1.5 flex items-center justify-between gap-3">
+                <span className="text-xs font-semibold text-[var(--navy)]">RSS- oder Atom-Feeds · bis zu 5</span>
+                <button type="button" onClick={addFeedUrl} disabled={feedUrls.length >= 5} className="inline-flex items-center gap-1 text-xs font-semibold text-[var(--teal)] disabled:text-slate-400">
+                  <Plus size={13} /> Feed hinzufügen
+                </button>
+              </div>
+              <div className="space-y-2">
+                {feedUrls.map((url, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--soft)] text-xs font-bold text-[var(--teal)]">{index + 1}</span>
+                    <input
+                      type="url"
+                      value={url}
+                      onChange={(event) => updateFeedUrl(index, event.target.value)}
+                      placeholder={index === 0 ? 'https://…/feed.xml' : 'Weiteren Feed eintragen'}
+                      className="field"
+                      aria-label={`RSS- oder Atom-Feed ${index + 1}`}
+                    />
+                    <button type="button" onClick={() => removeFeedUrl(index)} disabled={feedUrls.length === 1} className="icon-button shrink-0" aria-label={`Feed ${index + 1} entfernen`} title="Feed entfernen">
+                      <X size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="grid grid-cols-[110px_1fr] items-end gap-2 sm:col-span-2">
               <label>
-                <span className="mb-1.5 block text-xs font-semibold text-[var(--navy)]">Artikel</span>
+                <span className="mb-1.5 block text-xs font-semibold text-[var(--navy)]">Artikel je Feed</span>
                 <select value={limit} onChange={(event) => setLimit(event.target.value)} className="field">
                   <option value="5">5</option>
                   <option value="8">8</option>
@@ -399,7 +464,7 @@ export default function Home() {
               </label>
               <button type="submit" className="primary-button" disabled={isLoading}>
                 {isLoading ? <LoaderCircle className="animate-spin" size={17} /> : <Sparkles size={17} />}
-                {isLoading ? 'JEV analysiert …' : 'Feed analysieren'}
+                {isLoading ? 'JEV vergleicht …' : feedUrls.length > 1 ? 'Feeds vergleichen' : 'Feed analysieren'}
               </button>
             </div>
             {error && (
@@ -416,6 +481,38 @@ export default function Home() {
           <Metric label="Mittleres Resonanzsignal" value={`${average}/100`} detail={scoreLabel(average)} tone={scoreTone(average)} />
           <Metric label="Starke Signale" value={`${strongSignals}`} detail={`von ${results.length} Meldungen`} tone={strongSignals ? 'high' : 'low'} />
           <Metric label="Manuell prüfen" value={`${lowConfidence}`} detail="Konfidenz unter 55 %" tone={lowConfidence ? 'medium' : 'low'} />
+        </section>
+
+        <section className="mb-5 overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-[0_8px_28px_rgba(16,31,45,0.045)]">
+          <div className="flex flex-col gap-1 border-b border-[var(--line)] px-4 py-3.5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-center gap-2.5">
+              <span className="grid size-8 place-items-center rounded-lg bg-[var(--soft)] text-[var(--teal)]"><GitCompareArrows size={16} /></span>
+              <div><h2 className="font-display font-semibold text-[var(--navy)]">Feedvergleich</h2><p className="text-xs text-[var(--muted-ink)]">Normalisierte Mittelwerte bei gleicher Artikelzahl je Feed</p></div>
+            </div>
+            <p className="mt-2 text-xs text-slate-500 sm:mt-0">{feedComparison.length} {feedComparison.length === 1 ? 'Feed' : 'Feeds'} · Rang nach Resonanzsignal</p>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[820px] border-collapse text-left">
+              <thead><tr className="bg-[var(--soft)]/70 text-[11px] font-bold uppercase tracking-[0.1em] text-slate-500">
+                <th className="px-4 py-2.5">Rang</th><th className="px-3 py-2.5">Feed</th><th className="px-3 py-2.5 text-right">Meldungen</th><th className="px-3 py-2.5 text-right">Verunsicherung</th><th className="px-3 py-2.5 text-right">Agenda-Nähe</th><th className="px-3 py-2.5 text-right">Starke Signale</th><th className="px-3 py-2.5 text-right">JEV-Sicherheit</th><th className="px-4 py-2.5 text-right">Resonanz</th>
+              </tr></thead>
+              <tbody>
+                {feedComparison.map((feed, index) => (
+                  <tr key={feed.feedId} className="border-t border-[var(--line)] text-sm">
+                    <td className="px-4 py-3.5"><span className="grid size-7 place-items-center rounded-full bg-[var(--soft)] text-xs font-bold text-[var(--navy)]">{index + 1}</span></td>
+                    <td className="px-3 py-3.5 font-semibold text-[var(--navy)]">{feed.source}</td>
+                    <td className="px-3 py-3.5 text-right tabular-nums text-slate-600">{feed.count}</td>
+                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{feed.uncertainty}/100</td>
+                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.overlap)}</td>
+                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.strongShare)}</td>
+                    <td className="px-3 py-3.5 text-right font-semibold tabular-nums">{formatPercent(feed.confidence)}</td>
+                    <td className="px-4 py-3.5 text-right"><ScorePill score={feed.resonance} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="border-t border-[var(--line)] px-4 py-3 text-xs leading-5 text-slate-500">Der Vergleich zeigt das Profil der aktuell eingelesenen Titel und Kurztexte. Er misst weder journalistische Gesamtqualität noch politische Absicht eines Mediums.</p>
         </section>
 
         <section className="overflow-hidden rounded-2xl border border-[var(--line)] bg-white shadow-[0_12px_40px_rgba(16,31,45,0.06)]">
@@ -582,10 +679,11 @@ function ResultDetail({ item }: { item: ResultItem }) {
 
 function Methodology() {
   return (
-    <div className="grid gap-6 border-t border-[var(--line)] px-5 py-5 text-sm leading-6 text-[var(--muted-ink)] md:grid-cols-3">
+    <div className="grid gap-6 border-t border-[var(--line)] px-5 py-5 text-sm leading-6 text-[var(--muted-ink)] md:grid-cols-2 xl:grid-cols-4">
       <div><h3 className="font-semibold text-[var(--navy)]">1. Atomare JEV-Fragen</h3><p className="mt-1">Thema, Bedrohung, Kontrollverlust, Staatsversagen, Alltagsnähe, Schuldzuschreibung, Lösungslücke und Polarisierung werden unabhängig bewertet. Das vermeidet eine einzige überladene „AfD-Wirkung“-Frage.</p></div>
       <div><h3 className="font-semibold text-[var(--navy)]">2. Transparente Komposition</h3><p className="mt-1">Der Verunsicherungsindex gewichtet sieben beobachtbare Frames. Das Resonanzsignal kombiniert ihn zu 75 % mit 25 % AfD-Agenda-Nähe. Gewichte liegen im Code, nicht in einem versteckten Prompt.</p></div>
       <div><h3 className="font-semibold text-[var(--navy)]">3. Klare Grenze</h3><p className="mt-1">Gemessen wird nur Titel plus Kurzbeschreibung. Keine Aussage über Wahrheit, Reichweite, individuelle Emotionen, Kausalität oder tatsächliche Wahlentscheidung. Niedrige Konfidenzen gehören in eine manuelle Prüfung.</p></div>
+      <div><h3 className="font-semibold text-[var(--navy)]">4. Fairer Feedvergleich</h3><p className="mt-1">Jeder Feed liefert dieselbe maximale Zahl der neuesten Meldungen. Verglichen werden normalisierte Mittelwerte und Anteile. Das zeigt Unterschiede in dieser Stichprobe, nicht die dauerhafte Haltung oder Gesamtqualität eines Mediums.</p></div>
     </div>
   );
 }
